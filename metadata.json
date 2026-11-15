@@ -1,0 +1,6 @@
+{
+  "name": "墨韵本地书架阅读器",
+  "description": "纯前端本地离线书架阅读器，支持 EPUB/TXT 阅读、本地三目录文件夹读写、阅读量统计与豆包 AI 伴读助手。",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

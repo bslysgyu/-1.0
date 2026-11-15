@@ -1,0 +1,38 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install project dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Install Electron & electron-builder
+        run: npm install -D --legacy-peer-deps electron electron-builder
+
+      - name: Build web assets
+        run: npm run build
+
+      - name: Package Windows EXE (Portable & Installer)
+        run: npx electron-builder --win --config electron-builder.json
+
+      - name: Upload EXE artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: moyun-bookshelf-windows-exe
+          path: release/*.exe

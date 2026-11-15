@@ -1,0 +1,36 @@
+{
+  "appId": "com.moyun.localbookshelf",
+  "productName": "墨韵书架",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/main.cjs"
+  ],
+  "extraMetadata": {
+    "main": "electron/main.cjs",
+    "author": "Moyun Reader",
+    "description": "墨韵本地书架阅读器"
+  },
+  "win": {
+    "target": [
+      {
+        "target": "portable",
+        "arch": ["x64"]
+      },
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ]
+  },
+  "portable": {
+    "artifactName": "墨韵书架_便携版_${version}.exe"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "artifactName": "墨韵书架_安装包_${version}.exe"
+  }
+}
