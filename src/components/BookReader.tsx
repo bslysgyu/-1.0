@@ -18,6 +18,7 @@ import type {
   ReaderTheme,
 } from '../types/bookshelf';
 import { formatPercent } from '../utils/dateStats';
+import { ensurePdfWorker } from '../utils/pdfService';
 
 interface BookReaderProps {
   book: BookMetadata;
@@ -115,6 +116,7 @@ export const BookReader: React.FC<BookReaderProps> = ({
     }
     let cancelled = false;
     setPdfLoading(true);
+    ensurePdfWorker();
     const task = pdfjsLib.getDocument({
       data: new Uint8Array(parsedBook.pdfBytes.slice(0)),
     });

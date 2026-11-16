@@ -1,13 +1,26 @@
 import * as pdfjsLib from 'pdfjs-dist';
-import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import type { ParsedBook, ReaderPage, TocItem } from '../types/bookshelf';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+export function ensurePdfWorker(): void {
+  if (pdfjsLib.GlobalWorkerOptions.workerSrc) return;
+  const baseUrl = import.meta.env.BASE_URL || '/';
+  const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  const anchor = normalizedBase.startsWith('/')
+    ? window.location.origin
+    : window.location.href;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+    `${normalizedBase}pdf.worker.min.mjs`,
+    anchor
+  ).href;
+}
+
+ensurePdfWorker();
 
 export async function parsePdfMetadata(
   arrayBuffer: ArrayBuffer,
   extractCoverOnly = false
 ): Promise<ParsedBook> {
+  ensurePdfWorker();
   const dataCopy = new Uint8Array(arrayBuffer.slice(0));
   const loadingTask = pdfjsLib.getDocument({ data: dataCopy });
   const pdfDoc = await loadingTask.promise;
