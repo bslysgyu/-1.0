@@ -5,6 +5,7 @@ import {
   Download,
   FolderCheck,
   FolderOpen,
+  FolderSearch,
   FolderSync as FolderSyncIcon,
   HelpCircle,
   PanelRightOpen,
@@ -39,12 +40,14 @@ import {
   loadAssistantCollapsed,
   loadBooksFromLocalStorage,
   loadDeletedBookIds,
+  loadIgnoredSourceKeys,
   loadReaderPrefs,
   loadWebDavConfig,
   LocalShelfDB,
   saveAssistantCollapsed,
   saveBooksToLocalStorage,
   saveDeletedBookIds,
+  saveIgnoredSourceKeys,
   saveReaderPrefs,
   saveWebDavConfig,
   type FolderSyncState,
@@ -104,6 +107,7 @@ export default function App() {
   const [webdavConfig, setWebdavConfig] = useState<WebDavConfig>(() => loadWebDavConfig());
   const [webdavOpen, setWebdavOpen] = useState(false);
   const [webdavSyncing, setWebdavSyncing] = useState(false);
+  const [folderScanning, setFolderScanning] = useState(false);
   const [confirmState, setConfirmState] = useState<{
     open: boolean;
     title: string;
@@ -130,9 +134,12 @@ export default function App() {
   const coverUrlCacheRef = useRef<Map<string, string>>(new Map());
   const booksRef = useRef<BookMetadata[]>(books);
   const deletedIdsRef = useRef<Record<string, number>>(loadDeletedBookIds());
+  const ignoredSourcesRef = useRef<Set<string>>(new Set(loadIgnoredSourceKeys()));
   const webdavConfigRef = useRef<WebDavConfig>(webdavConfig);
   const autoSaveTimerRef = useRef<number | null>(null);
   const webdavPushTimerRef = useRef<number | null>(null);
+  const folderScanningRef = useRef(false);
+  const lastFocusScanRef = useRef(0);
   const importZipInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -174,6 +181,123 @@ export default function App() {
     []
   );
 
+  const scanConnectedFolderForNewBooks = useCallback(
+    async (silent = false): Promise<number> => {
+      if (!FolderSync.isConnected() || folderScanningRef.current) return 0;
+      folderScanningRef.current = true;
+      setFolderScanning(true);
+
+      try {
+        const scanned = await FolderSync.scanBookFiles();
+        const current = booksRef.current;
+        const knownFilePaths = new Set(current.map((b) => b.filePath));
+        const knownSourceKeys = new Set(
+          current.map((b) => b.sourceKey).filter((v): v is string => Boolean(v))
+        );
+        const knownNameSize = new Set(
+          current.map((b) => `${(b.filePath.split('/').pop() || '').toLowerCase()}::${b.fileSize}`)
+        );
+
+        const newItems = scanned.filter((item) => {
+          if (ignoredSourcesRef.current.has(item.sourceKey)) return false;
+          if (knownSourceKeys.has(item.sourceKey)) return false;
+          if (knownFilePaths.has(item.relPath)) return false;
+          if (
+            item.inBookfileDir &&
+            knownNameSize.has(`${item.file.name.toLowerCase()}::${item.file.size}`)
+          ) {
+            return false;
+          }
+          return true;
+        });
+
+        if (newItems.length === 0) {
+          if (!silent) {
+            showToast('本地文件夹已是最新，未发现新放入的电子书');
+          }
+          return 0;
+        }
+
+        if (!silent) {
+          showToast(`发现 ${newItems.length} 本新图书，正在解析封面并上架...`);
+        }
+
+        const addedBooks: BookMetadata[] = [];
+        for (const item of newItems) {
+          const id = genId('book');
+          const title = item.file.name.replace(/\.[^.]+$/, '').trim() || item.file.name;
+          const filePath = item.inBookfileDir
+            ? item.relPath
+            : `bookfile/${id}_${sanitizeFileName(item.file.name)}`;
+
+          let coverBlob: Blob | null = null;
+          let coverExt = 'png';
+          if (
+            ['epub', 'pdf', 'mobi', 'azw', 'azw3', 'prc', 'mbpv2', 'mbp', 'fb2', 'cbz'].includes(
+              item.ext
+            ) &&
+            item.file.size <= 80 * 1024 * 1024
+          ) {
+            try {
+              const ab = await item.file.arrayBuffer();
+              const res = await parseBookFile(ab, item.ext, true);
+              if (res.coverBlob) {
+                coverBlob = res.coverBlob;
+                coverExt = res.coverBlob.type.includes('jpeg') ? 'jpg' : 'png';
+              }
+            } catch {
+              // ignore cover extraction failure and use default cover
+            }
+          }
+
+          const resolvedCoverBlob = coverBlob ?? (await generateDefaultCoverBlob(title));
+          const coverPath = `cover/${id}_cover.${coverExt}`;
+
+          await LocalShelfDB.put('bookfiles', id, item.file);
+          await LocalShelfDB.put('covers', id, resolvedCoverBlob);
+
+          if (!item.inBookfileDir) {
+            await FolderSync.writeFileToSubDir('bookfile', filePath, item.file);
+          }
+          await FolderSync.writeFileToSubDir('cover', coverPath, resolvedCoverBlob);
+
+          if (webdavConfigRef.current.enabled && webdavConfigRef.current.url) {
+            await uploadWebDavFile(webdavConfigRef.current, filePath, item.file).catch(() => {});
+            await uploadWebDavFile(webdavConfigRef.current, coverPath, resolvedCoverBlob).catch(
+              () => {}
+            );
+          }
+
+          addedBooks.push({
+            id,
+            title,
+            coverPath,
+            filePath,
+            fileType: item.ext,
+            fileSize: item.file.size,
+            addedAt: formatDateStr(),
+            addedTimestamp: Date.now(),
+            lastReadTimestamp: Date.now(),
+            startReadTime: '',
+            readPercent: 0,
+            lastPosition: { page: 0, totalPages: 1 },
+            readHistory: [],
+            sourceKey: item.sourceKey,
+          });
+        }
+
+        const nextBooks = [...addedBooks, ...booksRef.current];
+        await persistBooks(nextBooks, true);
+        showToast(`已自动识别并上架 ${addedBooks.length} 本新书`);
+        return addedBooks.length;
+      } finally {
+        folderScanningRef.current = false;
+        setFolderScanning(false);
+      }
+    },
+    [persistBooks, showToast]
+  );
+
   const syncWithConnectedFolder = useCallback(async () => {
     if (!FolderSync.isConnected()) return;
     const diskData = await FolderSync.readBooksJson();
@@ -210,8 +334,9 @@ export default function App() {
       }
       await persistBooks(currentLocal, true);
     }
+    await scanConnectedFolderForNewBooks(true);
     setFolderState(FolderSync.getState());
-  }, [persistBooks]);
+  }, [persistBooks, scanConnectedFolderForNewBooks]);
 
   const syncWithWebDav = useCallback(
     async (cfgOverride?: WebDavConfig, silent = false) => {
@@ -307,6 +432,24 @@ export default function App() {
       active = false;
     };
   }, [syncWithConnectedFolder, syncWithWebDav]);
+
+  // Automatically scan connected folder for newly dropped books whenever returning to the window
+  useEffect(() => {
+    const maybeScan = () => {
+      if (!FolderSync.isConnected()) return;
+      if (document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      if (now - lastFocusScanRef.current < 2500) return;
+      lastFocusScanRef.current = now;
+      scanConnectedFolderForNewBooks(true);
+    };
+    window.addEventListener('focus', maybeScan);
+    document.addEventListener('visibilitychange', maybeScan);
+    return () => {
+      window.removeEventListener('focus', maybeScan);
+      document.removeEventListener('visibilitychange', maybeScan);
+    };
+  }, [scanConnectedFolderForNewBooks]);
 
   const handleBindOrReconnectFolder = async () => {
     if (FolderSync.hasSavedHandle() && !FolderSync.isConnected()) {
@@ -511,6 +654,11 @@ export default function App() {
           [book.id]: Date.now(),
         };
         saveDeletedBookIds(deletedIdsRef.current);
+
+        if (book.sourceKey) {
+          ignoredSourcesRef.current.add(book.sourceKey);
+          saveIgnoredSourceKeys(Array.from(ignoredSourcesRef.current));
+        }
 
         await LocalShelfDB.del('covers', book.id);
         await LocalShelfDB.del('bookfiles', book.id);
@@ -850,6 +998,19 @@ export default function App() {
                   <FolderBtnIcon className="w-3.5 h-3.5" />
                   {folderButtonConfig.label}
                 </button>
+
+                {folderState.status === 'connected' && (
+                  <button
+                    type="button"
+                    disabled={folderScanning}
+                    onClick={() => scanConnectedFolderForNewBooks(false)}
+                    title="扫描绑定文件夹内新放入的电子书"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[#c4d6c8] bg-white hover:bg-[#e6efe8] disabled:opacity-60 text-[12.5px] font-medium text-[#3a5742] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <FolderSearch className={`w-3.5 h-3.5 ${folderScanning ? 'animate-pulse' : ''}`} />
+                    {folderScanning ? '扫描中...' : '扫描新书'}
+                  </button>
+                )}
 
                 <button
                   type="button"

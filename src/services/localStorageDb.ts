@@ -6,11 +6,13 @@ import type {
   WebDavConfig,
 } from '../types/bookshelf';
 import { createZipBlob, parseZip, type ZipInputFile } from '../utils/zipEngine';
-import { formatDateStr } from '../utils/dateStats';
+import { formatDateStr, genId, sanitizeFileName } from '../utils/dateStats';
+import { generateDefaultCoverBlob, parseBookFile } from '../utils/bookParser';
 
 // Strictly separated localStorage keys: book data never mixes with Doubao assistant or WebDAV credentials
 const LS_BOOKS_META = 'local_shelf_books_meta_v1';
 const LS_DELETED_IDS = 'local_shelf_deleted_ids_v1';
+const LS_IGNORED_SOURCES = 'local_shelf_ignored_sources_v1';
 const LS_READER_PREFS = 'local_shelf_reader_prefs_v1';
 const LS_UI_STATE = 'local_shelf_ui_state_v1';
 const LS_WEBDAV_CFG = 'local_shelf_webdav_config_v1';
@@ -207,9 +209,16 @@ class FolderSyncService {
     data: Blob | string
   ): Promise<boolean> {
     if (!this.rootHandle || !this.hasPermission) return false;
-    const cleanName = filePath.split('/').pop() || filePath;
-    const subDir = await this.rootHandle.getDirectoryHandle(subDirName, { create: true });
-    const fileHandle = await subDir.getFileHandle(cleanName, { create: true });
+    const stripped = filePath.replace(new RegExp(`^${subDirName}/`), '');
+    const parts = stripped.split('/').filter(Boolean);
+    const fileName = parts.pop() || stripped;
+    let dir: FileSystemDirectoryHandle = await this.rootHandle.getDirectoryHandle(subDirName, {
+      create: true,
+    });
+    for (const seg of parts) {
+      dir = await dir.getDirectoryHandle(seg, { create: true });
+    }
+    const fileHandle = await dir.getFileHandle(fileName, { create: true });
     const writable = await fileHandle.createWritable();
     await writable.write(data);
     await writable.close();
@@ -222,9 +231,16 @@ class FolderSyncService {
   ): Promise<File | null> {
     if (!this.rootHandle || !this.hasPermission) return null;
     try {
-      const cleanName = filePath.split('/').pop() || filePath;
-      const subDir = await this.rootHandle.getDirectoryHandle(subDirName, { create: false });
-      const fileHandle = await subDir.getFileHandle(cleanName, { create: false });
+      const stripped = filePath.replace(new RegExp(`^${subDirName}/`), '');
+      const parts = stripped.split('/').filter(Boolean);
+      const fileName = parts.pop() || stripped;
+      let dir: FileSystemDirectoryHandle = await this.rootHandle.getDirectoryHandle(subDirName, {
+        create: false,
+      });
+      for (const seg of parts) {
+        dir = await dir.getDirectoryHandle(seg, { create: false });
+      }
+      const fileHandle = await dir.getFileHandle(fileName, { create: false });
       return await fileHandle.getFile();
     } catch {
       return null;
@@ -237,12 +253,103 @@ class FolderSyncService {
   ): Promise<void> {
     if (!this.rootHandle || !this.hasPermission || !filePath) return;
     try {
-      const cleanName = filePath.split('/').pop() || filePath;
-      const subDir = await this.rootHandle.getDirectoryHandle(subDirName, { create: false });
-      await subDir.removeEntry(cleanName);
+      const stripped = filePath.replace(new RegExp(`^${subDirName}/`), '');
+      const parts = stripped.split('/').filter(Boolean);
+      const fileName = parts.pop() || stripped;
+      let dir: FileSystemDirectoryHandle = await this.rootHandle.getDirectoryHandle(subDirName, {
+        create: false,
+      });
+      for (const seg of parts) {
+        dir = await dir.getDirectoryHandle(seg, { create: false });
+      }
+      await dir.removeEntry(fileName);
     } catch {
       // ignore missing file
     }
+  }
+
+  async scanBookFiles(): Promise<
+    Array<{
+      file: File;
+      inBookfileDir: boolean;
+      relPath: string;
+      ext: string;
+      sourceKey: string;
+    }>
+  > {
+    if (!this.rootHandle || !this.hasPermission) return [];
+
+    const SUPPORTED = new Set([
+      'epub',
+      'pdf',
+      'mobi',
+      'azw3',
+      'azw',
+      'prc',
+      'mbpv2',
+      'mbp',
+      'txt',
+      'docx',
+      'fb2',
+      'md',
+      'markdown',
+      'html',
+      'htm',
+      'cbz',
+    ]);
+
+    const results: Array<{
+      file: File;
+      inBookfileDir: boolean;
+      relPath: string;
+      ext: string;
+      sourceKey: string;
+    }> = [];
+
+    const walk = async (
+      dirHandle: ExtendedDirectoryHandle,
+      prefix: string,
+      inBookfileDir: boolean,
+      depth: number
+    ) => {
+      if (depth > 4) return;
+      try {
+        for await (const [name, handle] of dirHandle.entries()) {
+          if (!name || name.startsWith('.')) continue;
+          const lowerName = name.toLowerCase();
+          if (handle.kind === 'directory') {
+            if (!prefix && (lowerName === 'cover' || lowerName === 'data')) {
+              continue;
+            }
+            const nextInBookfile = inBookfileDir || (!prefix && lowerName === 'bookfile');
+            const nextPrefix = prefix ? `${prefix}/${name}` : name;
+            await walk(handle as ExtendedDirectoryHandle, nextPrefix, nextInBookfile, depth + 1);
+          } else if (handle.kind === 'file') {
+            const rawExt = lowerName.split('.').pop() || '';
+            if (!SUPPORTED.has(rawExt)) continue;
+            const ext = rawExt === 'markdown' ? 'md' : rawExt === 'htm' ? 'html' : rawExt;
+            try {
+              const file = await (handle as FileSystemFileHandle).getFile();
+              const relPath = prefix ? `${prefix}/${name}` : name;
+              results.push({
+                file,
+                inBookfileDir,
+                relPath,
+                ext,
+                sourceKey: `${relPath}::${file.size}`,
+              });
+            } catch {
+              // ignore unreadable file
+            }
+          }
+        }
+      } catch {
+        // ignore directory iteration errors
+      }
+    };
+
+    await walk(this.rootHandle, '', false, 0);
+    return results;
   }
 
   async readBooksJson(): Promise<{ books: BookMetadata[] } | null> {
@@ -301,6 +408,24 @@ export function loadDeletedBookIds(): Record<string, number> {
 export function saveDeletedBookIds(deletedIds: Record<string, number>): void {
   try {
     localStorage.setItem(LS_DELETED_IDS, JSON.stringify(deletedIds));
+  } catch {
+    // ignore quota errors
+  }
+}
+
+export function loadIgnoredSourceKeys(): string[] {
+  try {
+    const raw = localStorage.getItem(LS_IGNORED_SOURCES);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveIgnoredSourceKeys(keys: string[]): void {
+  try {
+    localStorage.setItem(LS_IGNORED_SOURCES, JSON.stringify(keys.slice(-500)));
   } catch {
     // ignore quota errors
   }
@@ -547,40 +672,124 @@ export async function importLibraryFromFolderFiles(
     }
   }
 
-  if (!booksJsonFile) {
-    throw new Error('所选文件夹内未找到 data/books.json，请确认选择的是墨韵书库根目录');
-  }
-
-  const jsonText = await booksJsonFile.text();
-  const parsed = JSON.parse(jsonText);
-  const incomingBooks: BookMetadata[] = Array.isArray(parsed?.books) ? parsed.books : [];
-  if (incomingBooks.length === 0) {
-    throw new Error('data/books.json 中没有有效书籍记录');
-  }
-
   const mergedMap = new Map<string, BookMetadata>();
   for (const b of existingBooks) {
     mergedMap.set(b.id, b);
   }
 
-  for (const book of incomingBooks) {
-    if (book.coverPath) {
-      const covFile = byRelPath.get(book.coverPath);
-      if (covFile) {
-        await LocalShelfDB.put('covers', book.id, covFile);
+  let importedCount = 0;
+
+  if (booksJsonFile) {
+    const jsonText = await booksJsonFile.text();
+    const parsed = JSON.parse(jsonText);
+    const incomingBooks: BookMetadata[] = Array.isArray(parsed?.books) ? parsed.books : [];
+    for (const book of incomingBooks) {
+      if (book.coverPath) {
+        const covFile = byRelPath.get(book.coverPath);
+        if (covFile) {
+          await LocalShelfDB.put('covers', book.id, covFile);
+        }
+      }
+      if (book.filePath) {
+        const bfFile = byRelPath.get(book.filePath);
+        if (bfFile) {
+          await LocalShelfDB.put('bookfiles', book.id, bfFile);
+        }
+      }
+      mergedMap.set(book.id, book);
+      importedCount++;
+    }
+  }
+
+  // Also auto-import any raw ebook files placed directly in the folder or bookfile/
+  const SUPPORTED = new Set([
+    'epub',
+    'pdf',
+    'mobi',
+    'azw3',
+    'azw',
+    'prc',
+    'mbpv2',
+    'mbp',
+    'txt',
+    'docx',
+    'fb2',
+    'md',
+    'markdown',
+    'html',
+    'htm',
+    'cbz',
+  ]);
+  const knownFilePaths = new Set(Array.from(mergedMap.values()).map((b) => b.filePath));
+  const knownNameSize = new Set(
+    Array.from(mergedMap.values()).map(
+      (b) => `${(b.filePath.split('/').pop() || '').toLowerCase()}::${b.fileSize}`
+    )
+  );
+
+  for (const [subPath, f] of byRelPath.entries()) {
+    const lowerPath = subPath.toLowerCase();
+    if (lowerPath.startsWith('cover/') || lowerPath.startsWith('data/')) continue;
+    const rawExt = lowerPath.split('.').pop() || '';
+    if (!SUPPORTED.has(rawExt)) continue;
+    if (knownFilePaths.has(subPath)) continue;
+    if (knownNameSize.has(`${f.name.toLowerCase()}::${f.size}`)) continue;
+
+    const ext = rawExt === 'markdown' ? 'md' : rawExt === 'htm' ? 'html' : rawExt;
+    const id = genId('book');
+    const title = f.name.replace(/\.[^.]+$/, '').trim() || f.name;
+    const filePath = subPath.startsWith('bookfile/')
+      ? subPath
+      : `bookfile/${id}_${sanitizeFileName(f.name)}`;
+
+    let coverBlob: Blob | null = null;
+    let coverExt = 'png';
+    if (
+      ['epub', 'pdf', 'mobi', 'azw', 'azw3', 'prc', 'mbpv2', 'mbp', 'fb2', 'cbz'].includes(ext) &&
+      f.size <= 80 * 1024 * 1024
+    ) {
+      try {
+        const ab = await f.arrayBuffer();
+        const res = await parseBookFile(ab, ext, true);
+        if (res.coverBlob) {
+          coverBlob = res.coverBlob;
+          coverExt = res.coverBlob.type.includes('jpeg') ? 'jpg' : 'png';
+        }
+      } catch {
+        // ignore fallback
       }
     }
-    if (book.filePath) {
-      const bfFile = byRelPath.get(book.filePath);
-      if (bfFile) {
-        await LocalShelfDB.put('bookfiles', book.id, bfFile);
-      }
-    }
-    mergedMap.set(book.id, book);
+
+    const resolvedCover = coverBlob ?? (await generateDefaultCoverBlob(title));
+    const coverPath = `cover/${id}_cover.${coverExt}`;
+    await LocalShelfDB.put('bookfiles', id, f);
+    await LocalShelfDB.put('covers', id, resolvedCover);
+
+    mergedMap.set(id, {
+      id,
+      title,
+      coverPath,
+      filePath,
+      fileType: ext,
+      fileSize: f.size,
+      addedAt: formatDateStr(),
+      addedTimestamp: Date.now(),
+      lastReadTimestamp: Date.now(),
+      startReadTime: '',
+      readPercent: 0,
+      lastPosition: { page: 0, totalPages: 1 },
+      readHistory: [],
+      sourceKey: `${subPath}::${f.size}`,
+    });
+    importedCount++;
+  }
+
+  if (importedCount === 0) {
+    throw new Error('所选文件夹内未找到支持的电子书文件或 data/books.json');
   }
 
   const merged = Array.from(mergedMap.values());
   saveBooksToLocalStorage(merged);
-  return { books: merged, importedCount: incomingBooks.length };
+  return { books: merged, importedCount };
 }
 

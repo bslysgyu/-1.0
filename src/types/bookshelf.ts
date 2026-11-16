@@ -59,6 +59,7 @@ export interface BookMetadata {
   finishedAt?: string; // YYYY-MM-DD
   lastPosition: BookLastPosition;
   readHistory: ReadHistoryEntry[];
+  sourceKey?: string;
 }
 
 export interface ReadingStats {
