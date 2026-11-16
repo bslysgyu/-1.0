@@ -322,7 +322,9 @@ export const DoubaoAssistantPanel: React.FC<DoubaoAssistantPanelProps> = ({
     <aside
       aria-label="豆包阅读助手"
       className={`shrink-0 bg-[#fffdf9] border-l border-[#e4ded3] flex flex-col h-full transition-all duration-200 overflow-hidden ${
-        collapsed ? 'w-0 border-l-0 opacity-0 pointer-events-none' : 'w-[380px]'
+        collapsed
+          ? 'w-0 border-l-0 opacity-0 pointer-events-none'
+          : 'fixed inset-y-0 right-0 z-40 w-[92vw] max-w-[380px] shadow-2xl md:static md:w-[380px] md:shadow-none'
       }`}
     >
       {/* Panel Header */}

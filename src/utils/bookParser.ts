@@ -1,6 +1,6 @@
 import type { ParsedBook, ReaderPage, TocItem } from '../types/bookshelf';
 import { parseZip } from './zipEngine';
-import { parseMobiBuffer } from './mobiParser';
+import { parseMbpv2Buffer, parseMobiBuffer } from './mobiParser';
 import { parsePdfMetadata } from './pdfService';
 
 function escapeHtml(str: string): string {
@@ -130,10 +130,18 @@ function htmlStringToPaginatedBook(
     /^(第[零一二三四五六七八九十百千万0-9]+[章节回卷部篇集].{0,35}|Chapter\s+\d+.*|序章.*|前言.*|楔子.*|尾声.*|后记.*|番外.*)$/i;
 
   let chIdx = 0;
-  const elements = body.querySelectorAll('h1, h2, h3, h4, p, blockquote, li, pre');
+  let elements = Array.from(body.querySelectorAll('h1, h2, h3, h4, p, blockquote, li, pre'));
+  if (elements.length < 3) {
+    const divBlocks = Array.from(body.querySelectorAll('div')).filter(
+      (d) => d.querySelectorAll('p, div, h1, h2, h3').length === 0
+    );
+    if (divBlocks.length > elements.length) {
+      elements = divBlocks;
+    }
+  }
 
   if (elements.length > 0) {
-    for (const el of Array.from(elements)) {
+    for (const el of elements) {
       const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
       if (!txt) continue;
       const tag = el.tagName.toLowerCase();
@@ -147,7 +155,7 @@ function htmlStringToPaginatedBook(
           chapterKey: key,
           chapterTitle: label,
           text: txt,
-          html: `<${tag === 'p' ? 'h2' : tag}>${escapeHtml(txt)}</${tag === 'p' ? 'h2' : tag}>`,
+          html: `<${tag === 'p' || tag === 'div' ? 'h2' : tag}>${escapeHtml(txt)}</${tag === 'p' || tag === 'div' ? 'h2' : tag}>`,
         });
       } else {
         const safeTag = ['h1', 'h2', 'h3', 'h4', 'blockquote'].includes(tag) ? tag : 'p';
@@ -658,6 +666,13 @@ export async function parseBookFile(
       return { kind: 'text', pages: [], toc: [], coverBlob: mobi.coverBlob };
     }
     return htmlStringToPaginatedBook(mobi.htmlContent, mobi.coverBlob);
+  }
+  if (['mbpv2', 'mbp'].includes(ext)) {
+    const mbpv2 = parseMbpv2Buffer(arrayBuffer);
+    if (extractCoverOnly) {
+      return { kind: 'text', pages: [], toc: [], coverBlob: mbpv2.coverBlob };
+    }
+    return htmlStringToPaginatedBook(mbpv2.htmlContent, mbpv2.coverBlob);
   }
   if (ext === 'fb2') {
     return parseFb2(arrayBuffer, extractCoverOnly);

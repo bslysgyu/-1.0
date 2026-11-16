@@ -3,14 +3,17 @@ import type {
   ChatMessage,
   DoubaoConfig,
   ReaderPrefs,
+  WebDavConfig,
 } from '../types/bookshelf';
-import { createZipBlob, type ZipInputFile } from '../utils/zipEngine';
+import { createZipBlob, parseZip, type ZipInputFile } from '../utils/zipEngine';
 import { formatDateStr } from '../utils/dateStats';
 
-// Strictly separated localStorage keys: book data never mixes with Doubao assistant data
+// Strictly separated localStorage keys: book data never mixes with Doubao assistant or WebDAV credentials
 const LS_BOOKS_META = 'local_shelf_books_meta_v1';
+const LS_DELETED_IDS = 'local_shelf_deleted_ids_v1';
 const LS_READER_PREFS = 'local_shelf_reader_prefs_v1';
 const LS_UI_STATE = 'local_shelf_ui_state_v1';
+const LS_WEBDAV_CFG = 'local_shelf_webdav_config_v1';
 const LS_DOUBAO_CFG = 'local_shelf_doubao_config_v1';
 const LS_DOUBAO_CHAT = 'local_shelf_doubao_chats_v1';
 
@@ -97,6 +100,14 @@ class FolderSyncService {
     return typeof window.showDirectoryPicker === 'function';
   }
 
+  isCrossOriginIframe(): boolean {
+    try {
+      return window.self !== window.top;
+    } catch {
+      return true;
+    }
+  }
+
   getState(): FolderSyncState {
     if (!this.isSupported()) {
       return { status: 'unsupported', folderName: '' };
@@ -124,11 +135,18 @@ class FolderSyncService {
     await root.getDirectoryHandle('data', { create: true });
   }
 
-  async pickAndConnect(): Promise<{ ok: boolean; error?: string }> {
+  async pickAndConnect(): Promise<{ ok: boolean; blockedByIframe?: boolean; error?: string }> {
     if (!this.isSupported()) {
       return {
         ok: false,
-        error: '当前浏览器或窗口环境不支持目录直写，请使用最新版 Chrome/Edge 桌面端（或使用导出书库 ZIP 功能）。',
+        error: '当前浏览器或窗口环境不支持目录直写，请使用最新版 Chrome/Edge 桌面端（或使用导入/导出书库 ZIP 功能）。',
+      };
+    }
+    if (this.isCrossOriginIframe()) {
+      return {
+        ok: false,
+        blockedByIframe: true,
+        error: '当前处于预览嵌套框内，浏览器安全策略禁止弹出硬盘读写授权，请在新标签页打开或使用桌面版。',
       };
     }
     try {
@@ -144,6 +162,17 @@ class FolderSyncService {
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
         return { ok: false };
+      }
+      if (
+        err instanceof Error &&
+        (err.name === 'SecurityError' ||
+          /cross[- ]origin|sub ?frame/i.test(err.message))
+      ) {
+        return {
+          ok: false,
+          blockedByIframe: true,
+          error: '当前处于预览嵌套框内，浏览器安全策略禁止弹出硬盘读写授权，请在新标签页打开或使用桌面版。',
+        };
       }
       return {
         ok: false,
@@ -259,6 +288,55 @@ export function saveBooksToLocalStorage(books: BookMetadata[]): void {
   }
 }
 
+export function loadDeletedBookIds(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(LS_DELETED_IDS);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveDeletedBookIds(deletedIds: Record<string, number>): void {
+  try {
+    localStorage.setItem(LS_DELETED_IDS, JSON.stringify(deletedIds));
+  } catch {
+    // ignore quota errors
+  }
+}
+
+export function loadWebDavConfig(): WebDavConfig {
+  try {
+    const raw = localStorage.getItem(LS_WEBDAV_CFG);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return {
+      enabled: Boolean(parsed?.enabled),
+      url: typeof parsed?.url === 'string' ? parsed.url : '',
+      username: typeof parsed?.username === 'string' ? parsed.username : '',
+      password: typeof parsed?.password === 'string' ? parsed.password : '',
+      autoSync: parsed?.autoSync !== false,
+      lastSyncAt: typeof parsed?.lastSyncAt === 'string' ? parsed.lastSyncAt : undefined,
+    };
+  } catch {
+    return {
+      enabled: false,
+      url: '',
+      username: '',
+      password: '',
+      autoSync: true,
+    };
+  }
+}
+
+export function saveWebDavConfig(cfg: WebDavConfig): void {
+  try {
+    localStorage.setItem(LS_WEBDAV_CFG, JSON.stringify(cfg));
+  } catch {
+    // ignore quota errors
+  }
+}
+
 export function loadReaderPrefs(): ReaderPrefs {
   try {
     const raw = localStorage.getItem(LS_READER_PREFS);
@@ -279,7 +357,10 @@ export function saveReaderPrefs(prefs: ReaderPrefs): void {
 export function loadAssistantCollapsed(): boolean {
   try {
     const raw = localStorage.getItem(LS_UI_STATE);
-    return Boolean(raw ? JSON.parse(raw).assistantCollapsed : false);
+    if (raw) {
+      return Boolean(JSON.parse(raw).assistantCollapsed);
+    }
+    return typeof window !== 'undefined' && window.innerWidth < 768;
   } catch {
     return false;
   }
@@ -375,3 +456,131 @@ export async function exportLibraryZip(books: BookMetadata[]): Promise<void> {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
+
+function guessMimeFromPath(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase() || '';
+  if (ext === 'png') return 'image/png';
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  if (ext === 'webp') return 'image/webp';
+  if (ext === 'pdf') return 'application/pdf';
+  if (ext === 'epub') return 'application/epub+zip';
+  return 'application/octet-stream';
+}
+
+export async function importLibraryZip(
+  zipFile: File,
+  existingBooks: BookMetadata[]
+): Promise<{ books: BookMetadata[]; importedCount: number }> {
+  const ab = await zipFile.arrayBuffer();
+  const zip = await parseZip(ab);
+
+  const jsonText = await zip.getEntryText('data/books.json');
+  if (!jsonText) {
+    throw new Error('压缩包内未找到 data/books.json，无法识别为墨韵书库备份包');
+  }
+
+  const parsed = JSON.parse(jsonText);
+  const incomingBooks: BookMetadata[] = Array.isArray(parsed?.books) ? parsed.books : [];
+  if (incomingBooks.length === 0) {
+    throw new Error('data/books.json 中没有有效书籍记录');
+  }
+
+  const mergedMap = new Map<string, BookMetadata>();
+  for (const b of existingBooks) {
+    mergedMap.set(b.id, b);
+  }
+
+  for (const book of incomingBooks) {
+    if (book.coverPath) {
+      const covBytes = await zip.getEntryBytes(book.coverPath);
+      if (covBytes) {
+        const covBlob = new Blob([new Uint8Array(covBytes).buffer], {
+          type: guessMimeFromPath(book.coverPath),
+        });
+        await LocalShelfDB.put('covers', book.id, covBlob);
+        if (FolderSync.isConnected()) {
+          await FolderSync.writeFileToSubDir('cover', book.coverPath, covBlob);
+        }
+      }
+    }
+
+    if (book.filePath) {
+      const bfBytes = await zip.getEntryBytes(book.filePath);
+      if (bfBytes) {
+        const bfBlob = new Blob([new Uint8Array(bfBytes).buffer], {
+          type: guessMimeFromPath(book.filePath),
+        });
+        await LocalShelfDB.put('bookfiles', book.id, bfBlob);
+        if (FolderSync.isConnected()) {
+          await FolderSync.writeFileToSubDir('bookfile', book.filePath, bfBlob);
+        }
+      }
+    }
+
+    mergedMap.set(book.id, book);
+  }
+
+  const merged = Array.from(mergedMap.values());
+  saveBooksToLocalStorage(merged);
+  if (FolderSync.isConnected()) {
+    await FolderSync.writeBooksJson(merged);
+  }
+
+  return { books: merged, importedCount: incomingBooks.length };
+}
+
+export async function importLibraryFromFolderFiles(
+  fileList: FileList,
+  existingBooks: BookMetadata[]
+): Promise<{ books: BookMetadata[]; importedCount: number }> {
+  const files = Array.from(fileList);
+  const byRelPath = new Map<string, File>();
+  let booksJsonFile: File | null = null;
+
+  for (const f of files) {
+    const rel = (f.webkitRelativePath || f.name).replace(/\\/g, '/');
+    const parts = rel.split('/');
+    const subPath = parts.length > 1 ? parts.slice(1).join('/') : rel;
+    byRelPath.set(subPath, f);
+    if (subPath === 'data/books.json' || rel.endsWith('/data/books.json')) {
+      booksJsonFile = f;
+    }
+  }
+
+  if (!booksJsonFile) {
+    throw new Error('所选文件夹内未找到 data/books.json，请确认选择的是墨韵书库根目录');
+  }
+
+  const jsonText = await booksJsonFile.text();
+  const parsed = JSON.parse(jsonText);
+  const incomingBooks: BookMetadata[] = Array.isArray(parsed?.books) ? parsed.books : [];
+  if (incomingBooks.length === 0) {
+    throw new Error('data/books.json 中没有有效书籍记录');
+  }
+
+  const mergedMap = new Map<string, BookMetadata>();
+  for (const b of existingBooks) {
+    mergedMap.set(b.id, b);
+  }
+
+  for (const book of incomingBooks) {
+    if (book.coverPath) {
+      const covFile = byRelPath.get(book.coverPath);
+      if (covFile) {
+        await LocalShelfDB.put('covers', book.id, covFile);
+      }
+    }
+    if (book.filePath) {
+      const bfFile = byRelPath.get(book.filePath);
+      if (bfFile) {
+        await LocalShelfDB.put('bookfiles', book.id, bfFile);
+      }
+    }
+    mergedMap.set(book.id, book);
+  }
+
+  const merged = Array.from(mergedMap.values());
+  saveBooksToLocalStorage(merged);
+  return { books: merged, importedCount: incomingBooks.length };
+}
+

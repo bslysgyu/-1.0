@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FolderTree, Image as ImageIcon, Upload, X } from 'lucide-react';
+import { AlertCircle, ExternalLink, FolderTree, Image as ImageIcon, Upload, X } from 'lucide-react';
 import type { BookMetadata } from '../types/bookshelf';
 
 /* ---------- 上传图书弹窗 ---------- */
@@ -49,6 +49,8 @@ export const UploadBookModal: React.FC<UploadBookModalProps> = ({
     'azw3',
     'azw',
     'prc',
+    'mbpv2',
+    'mbp',
     'txt',
     'docx',
     'fb2',
@@ -64,7 +66,7 @@ export const UploadBookModal: React.FC<UploadBookModalProps> = ({
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
     if (!SUPPORTED_EXTS.includes(ext)) {
       setErrorMsg(
-        '暂不支持该文件格式，目前支持：EPUB / PDF / MOBI / AZW3 / AZW / PRC / TXT / DOCX / FB2 / MD / HTML / CBZ'
+        '暂不支持该文件格式，目前支持：EPUB / PDF / MOBI / MBPV2 / AZW3 / AZW / PRC / TXT / DOCX / FB2 / MD / HTML / CBZ'
       );
       return;
     }
@@ -161,12 +163,12 @@ export const UploadBookModal: React.FC<UploadBookModalProps> = ({
                   : '点击或拖拽电子书文件到此处'}
               </div>
               <div className="text-[11px] text-[#8a8377] mt-1">
-                支持 .pdf / .epub / .mobi / .azw3 / .azw / .prc / .txt / .docx / .fb2 / .md / .html / .cbz
+                支持 .pdf / .epub / .mobi / .mbpv2 / .azw3 / .azw / .prc / .txt / .docx / .fb2 / .md / .html / .cbz
               </div>
               <input
                 ref={bookInputRef}
                 type="file"
-                accept=".epub,.pdf,.mobi,.azw3,.azw,.prc,.txt,.docx,.fb2,.md,.markdown,.html,.htm,.cbz"
+                accept=".epub,.pdf,.mobi,.azw3,.azw,.prc,.mbpv2,.mbp,.txt,.docx,.fb2,.md,.markdown,.html,.htm,.cbz"
                 className="hidden"
                 onChange={(e) => handleBookPick(e.target.files?.[0])}
               />
@@ -389,19 +391,27 @@ interface FolderGuideModalProps {
   open: boolean;
   folderName: string;
   isSupported: boolean;
+  iframeBlocked?: boolean;
   onClose: () => void;
   onBindFolder: () => void;
   onExportZip: () => void;
+  onImportZip: (file: File) => void;
+  onImportFolder?: (files: FileList) => void;
 }
 
 export const FolderGuideModal: React.FC<FolderGuideModalProps> = ({
   open,
   folderName,
   isSupported,
+  iframeBlocked = false,
   onClose,
   onBindFolder,
   onExportZip,
+  onImportZip,
+  onImportFolder,
 }) => {
+  const importZipRef = useRef<HTMLInputElement>(null);
+  const importDirRef = useRef<HTMLInputElement>(null);
   if (!open) return null;
 
   return (
@@ -429,6 +439,38 @@ export const FolderGuideModal: React.FC<FolderGuideModalProps> = ({
         </div>
 
         <div className="p-5 space-y-4 text-[13px] text-[#26231f] leading-relaxed max-h-[75vh] overflow-y-auto">
+          {iframeBlocked && (
+            <div className="bg-[#fdf3e7] border border-[#e6c79c] rounded-xl p-3.5 text-[12.5px] text-[#5e3d17] space-y-2">
+              <div className="flex items-center gap-1.5 font-semibold text-[#7a4b13]">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>当前处于预览嵌入窗口中，浏览器安全策略限制了硬盘直写</span>
+              </div>
+              <p className="leading-relaxed text-[#6b4d27]">
+                Chrome / Edge 不允许在跨域嵌套预览框（iframe）内弹出本地文件夹读写授权窗口。你可以：
+              </p>
+              <div className="flex flex-wrap gap-2 pt-0.5">
+                <a
+                  href={typeof window !== 'undefined' ? window.location.href : '#'}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#3e5c47] hover:bg-[#2f4836] text-white text-[12px] font-medium no-underline"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  在新标签页独立打开（解锁绑定文件夹）
+                </a>
+                {onImportFolder && (
+                  <button
+                    type="button"
+                    onClick={() => importDirRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#d6b88d] bg-white hover:bg-[#f9f2e7] text-[#5e3d17] text-[12px] font-medium cursor-pointer"
+                  >
+                    读取已有本地书库文件夹
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           <p className="text-[#6b655b]">
             本应用为纯前端本地架构，所有书籍、封面、阅读进度与统计均保存在您的本地设备中，不自动上传任何云端服务器。
           </p>
@@ -438,19 +480,19 @@ export const FolderGuideModal: React.FC<FolderGuideModalProps> = ({
               {folderName ? `当前已绑定文件夹：${folderName}/` : '您指定的本地根文件夹/（如 D:\\MyBookshelf）'}
             </div>
             <div>├── cover/ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# 存放所有图书封面图片</div>
-            <div>├── bookfile/ &nbsp;&nbsp;&nbsp;# 存放上传的电子书原文件 (.epub / .txt)</div>
+            <div>├── bookfile/ &nbsp;&nbsp;&nbsp;# 存放上传的电子书原文件 (PDF/EPUB/MOBI/MBPV2/AZW3/TXT 等)</div>
             <div>└── data/</div>
             <div>&nbsp;&nbsp;&nbsp;&nbsp;└── books.json &nbsp;# 存储书名、路径、开始阅读时间、进度与历史</div>
           </div>
 
           <div className="space-y-2 text-[12.5px] text-[#6b655b]">
             <p>
-              <strong className="text-[#26231f]">1. 电脑硬盘直写模式：</strong>
-              使用 Chrome / Edge 浏览器点击「绑定本地文件夹」并授权您电脑上的任意文件夹，即可自动创建上述 3 个子目录并实时写入。
+              <strong className="text-[#26231f]">1. 电脑硬盘直写模式（Windows / macOS / Linux Chrome &amp; Edge）：</strong>
+              点击「绑定本地文件夹」授权任意文件夹，即可自动创建上述 3 个子目录并实时写入。配合 OneDrive / iCloud / 坚果云同步该文件夹即可多电脑无缝衔接。
             </p>
             <p>
-              <strong className="text-[#26231f]">2. 浏览器离线缓存保障：</strong>
-              即使暂未绑定文件夹（或在 iframe / Safari 等受限环境下），数据也会实时保存于浏览器 <code className="text-[#26231f]">localStorage</code> 与 <code className="text-[#26231f]">IndexedDB</code>，刷新页面不丢失，并可随时通过「导出本地书库」生成包含完整三目录结构的 ZIP 备份包。
+              <strong className="text-[#26231f]">2. 跨平台 ZIP 备份与迁移（iPad / 手机 / Safari / Firefox 通用）：</strong>
+              数据默认保存在设备本地 <code className="text-[#26231f]">IndexedDB</code> 与 <code className="text-[#26231f]">localStorage</code> 中；点击「导出三目录 ZIP 包」即可在其他手机、平板或电脑上通过「导入书库 ZIP」一键恢复全部藏书、封面与阅读统计。
             </p>
             <p>
               <strong className="text-[#26231f]">3. 豆包对话数据隔离：</strong>
@@ -459,7 +501,45 @@ export const FolderGuideModal: React.FC<FolderGuideModalProps> = ({
           </div>
         </div>
 
-        <div className="px-5 py-3.5 border-t border-[#e4ded3] bg-[#f6f4ef] flex justify-end gap-2.5">
+        <div className="px-5 py-3.5 border-t border-[#e4ded3] bg-[#f6f4ef] flex flex-wrap justify-end gap-2.5">
+          <input
+            ref={importZipRef}
+            type="file"
+            accept=".zip"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = '';
+              if (f) {
+                onClose();
+                onImportZip(f);
+              }
+            }}
+          />
+          {onImportFolder && (
+            <input
+              ref={importDirRef}
+              type="file"
+              {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                const fl = e.target.files;
+                if (fl && fl.length > 0) {
+                  onClose();
+                  onImportFolder(fl);
+                }
+                e.target.value = '';
+              }}
+            />
+          )}
+          <button
+            type="button"
+            onClick={() => importZipRef.current?.click()}
+            className="px-3.5 py-2 rounded-lg border border-[#e4ded3] bg-white text-[13px] font-medium text-[#26231f] hover:bg-[#ece7dc] cursor-pointer"
+          >
+            导入书库 ZIP
+          </button>
           <button
             type="button"
             onClick={onExportZip}
@@ -467,7 +547,7 @@ export const FolderGuideModal: React.FC<FolderGuideModalProps> = ({
           >
             导出三目录 ZIP 包
           </button>
-          {isSupported && (
+          {isSupported && !iframeBlocked && (
             <button
               type="button"
               onClick={() => {

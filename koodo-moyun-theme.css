@@ -1,0 +1,275 @@
+/* ============================================================
+   Koodo Reader 2.4.7 「墨韵木质书架」复刻主题 v2
+   用法：打开 Koodo Reader → 设置 → 外观 → 翻到底部
+         打开「自定义应用样式」开关 → 全选替换为本 CSS → 保存
+   提示：建议将外观模式设为「白天模式」以获得最佳胡桃木书房效果
+   ============================================================ */
+
+:root {
+  --moyun-wall: #e7dfd3;
+  --moyun-paper: #fbf7ef;
+  --moyun-ivory: #fbf7ef;
+  --moyun-ink: #261e17;
+  --moyun-ink-sub: #6b5d4f;
+  --moyun-border: #d6c8b4;
+  --moyun-accent: #3e5c47;
+  --moyun-accent-hover: #2f4836;
+  --moyun-wood-dark: #24160e;
+  --moyun-wood-frame: #4b311e;
+  --moyun-wood-plank: #6e472b;
+  --moyun-brass: #c9ab78;
+
+  /* 书架层板与每排书行高微调（若屏幕缩放不同，微调这 3 个像素值即可精准对齐） */
+  --moyun-shelf-height: 304px;
+  --moyun-brass-y: 162px;
+  --moyun-plank-y: 194px;
+}
+
+/* 1. 全局字体与温润纸感基调 */
+html,
+body,
+#root {
+  background-color: var(--moyun-wall) !important;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif !important;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 2. 左侧胡桃木导航侧边栏 */
+.sidebar {
+  background: linear-gradient(180deg, #543723 0%, #432b1a 48%, #342013 100%) !important;
+  border-right: 2px solid #2b1a0f !important;
+  box-shadow: inset -1px 0 0 rgba(255, 224, 185, 0.12), 4px 0 14px rgba(25, 14, 6, 0.25) !important;
+  color: #efe4d2 !important;
+}
+
+.sidebar .sidebar-list-item,
+.sidebar li,
+.sidebar a,
+.sidebar span {
+  color: #e6d7c1 !important;
+  transition: background-color 0.18s ease, color 0.18s ease !important;
+}
+
+.sidebar .sidebar-list-item:hover,
+.sidebar li:hover {
+  background: rgba(255, 226, 180, 0.1) !important;
+  border-radius: 8px !important;
+}
+
+.sidebar .sidebar-list-item.active,
+.sidebar .active-item,
+.sidebar li.active,
+.sidebar [class*="active"] {
+  background: linear-gradient(90deg, #3e5c47 0%, #2f4836 100%) !important;
+  color: #fbf7ef !important;
+  border-radius: 8px !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 2px 6px rgba(0, 0, 0, 0.28) !important;
+}
+
+/* 3. 顶部工具栏（宣纸质感 Header） */
+.header,
+[class*="header-container"] {
+  background: var(--moyun-paper) !important;
+  border-bottom: 1px solid var(--moyun-border) !important;
+  color: var(--moyun-ink) !important;
+  box-shadow: 0 2px 10px rgba(40, 26, 14, 0.06) !important;
+}
+
+.header input,
+.header-search-box input,
+[class*="search"] input {
+  background: #ffffff !important;
+  color: var(--moyun-ink) !important;
+  border: 1px solid var(--moyun-border) !important;
+  border-radius: 8px !important;
+}
+
+.header input:focus,
+[class*="search"] input:focus {
+  border-color: var(--moyun-accent) !important;
+  outline: none !important;
+}
+
+.header .import-from-local,
+.import-from-local,
+[class*="import-btn"] {
+  background-color: var(--moyun-accent) !important;
+  color: #ffffff !important;
+  border: 1px solid var(--moyun-accent-hover) !important;
+  border-radius: 8px !important;
+}
+
+.header .import-from-local:hover,
+.import-from-local:hover {
+  background-color: var(--moyun-accent-hover) !important;
+}
+
+/* 4. 主体书房墙面 + 顶部三盏吊灯暖光 */
+.book-list-container,
+.main-content,
+[class*="booklist-container"] {
+  background:
+    radial-gradient(ellipse 22% 140px at 18% 0%, rgba(255, 224, 158, 0.26) 0%, transparent 72%),
+    radial-gradient(ellipse 22% 140px at 50% 0%, rgba(255, 224, 158, 0.30) 0%, transparent 72%),
+    radial-gradient(ellipse 22% 140px at 82% 0%, rgba(255, 224, 158, 0.26) 0%, transparent 72%),
+    linear-gradient(180deg, #e9e1d5 0%, #dfd5c6 55%, #d6cbb9 100%) !important;
+  padding: 20px 24px !important;
+}
+
+/* 5. 胡桃木内凹书柜 + 实木层板（紧托封面底部） + 黄铜护栏 */
+.book-list-item-box,
+.book-cover-list,
+[class*="book-list-wrap"] {
+  position: relative !important;
+  border: 12px solid var(--moyun-wood-frame) !important;
+  border-radius: 14px !important;
+  padding: 24px 24px 36px !important;
+  row-gap: 24px !important;
+  column-gap: 22px !important;
+  box-shadow:
+    inset 0 14px 28px rgba(0, 0, 0, 0.62),
+    inset 0 1px 0 rgba(255, 224, 185, 0.2),
+    0 18px 40px rgba(32, 20, 10, 0.28) !important;
+  background-image:
+    radial-gradient(ellipse 25% 150px at 20% 2%, rgba(255, 225, 165, 0.16) 0%, transparent 70%),
+    radial-gradient(ellipse 25% 150px at 50% 2%, rgba(255, 225, 165, 0.18) 0%, transparent 70%),
+    radial-gradient(ellipse 25% 150px at 80% 2%, rgba(255, 225, 165, 0.16) 0%, transparent 70%),
+    repeating-linear-gradient(
+      180deg,
+      /* 书柜背板阴影区 */
+      rgba(43, 27, 17, 0.94) 0px,
+      rgba(32, 19, 11, 0.97) var(--moyun-brass-y),
+      /* 细黄铜防倾护栏（从书籍下端穿过，不压书名） */
+      rgba(201, 171, 120, 0.42) var(--moyun-brass-y),
+      rgba(201, 171, 120, 0.42) calc(var(--moyun-brass-y) + 2px),
+      rgba(28, 16, 9, 0.98) calc(var(--moyun-brass-y) + 2px),
+      rgba(24, 14, 8, 1) var(--moyun-plank-y),
+      /* 3D 实木层板（正好托在书本底部） */
+      #8b603d var(--moyun-plank-y),
+      #744d2f calc(var(--moyun-plank-y) + 5px),
+      #5d3c23 calc(var(--moyun-plank-y) + 14px),
+      #3f2615 calc(var(--moyun-plank-y) + 20px),
+      /* 层板下方投影 + 铭牌停放凹槽 */
+      rgba(22, 13, 7, 0.96) calc(var(--moyun-plank-y) + 20px),
+      rgba(36, 22, 13, 0.94) calc(var(--moyun-plank-y) + 34px),
+      rgba(43, 27, 17, 0.94) var(--moyun-shelf-height)
+    ) !important;
+  background-attachment: local !important;
+}
+
+/* 6. 单本图书立体实体感（封面阴影、白纸书页厚度、悬停抽出动效） */
+.book-cover-item,
+.book-list-item,
+.book-card-item,
+[class*="book-item"] {
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1) !important;
+  margin-bottom: 12px !important;
+}
+
+.book-cover-item:hover,
+.book-card-item:hover {
+  transform: translateY(-8px) scale(1.02) !important;
+  z-index: 5 !important;
+}
+
+.book-cover-item .book-item-cover,
+.book-cover-item img,
+.book-item-cover,
+[class*="book-cover"] img {
+  border-radius: 5px !important;
+  box-shadow:
+    0 8px 16px rgba(0, 0, 0, 0.62),
+    3px 0 0 #d8cfbe,
+    4px 0 5px rgba(0, 0, 0, 0.38),
+    inset 4px 0 10px rgba(0, 0, 0, 0.32) !important;
+  border: 1px solid rgba(255, 232, 198, 0.16) !important;
+}
+
+/* 7. 书名铭牌：彻底解决文字截断 + 拉开封面/层板与状态栏之间的呼吸间隙 */
+.book-cover-item .book-item-title,
+.book-card-item .book-item-title,
+.book-cover-item [class*="title"],
+.book-card-item [class*="title"] {
+  /* 与木质层板拉开清晰间隙，不再紧贴封面 */
+  margin-top: 26px !important;
+  margin-bottom: 8px !important;
+  /* 统一单行省略（与墨韵 BookPlaque 一致），彻底杜绝多行被腰斩 */
+  display: block !important;
+  width: 100% !important;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  box-sizing: border-box !important;
+  padding: 6px 10px !important;
+  background: var(--moyun-ivory) !important;
+  color: var(--moyun-ink) !important;
+  border: 1px solid #d4c5af !important;
+  border-radius: 7px !important;
+  font-size: 12.5px !important;
+  font-weight: 600 !important;
+  line-height: 1.45 !important;
+  text-align: left !important;
+  box-shadow: 0 2px 6px rgba(20, 12, 5, 0.28) !important;
+}
+
+/* 如果你更希望书名显示两行而不是单行省略，把上面 white-space: nowrap 删掉，改用下面这段：
+   display: -webkit-box !important;
+   -webkit-line-clamp: 2 !important;
+   -webkit-box-orient: vertical !important;
+   white-space: normal !important;
+   height: auto !important;
+*/
+
+/* 底部 "New / 72.35%  ..." 状态栏呼吸间距与配色 */
+.book-cover-item .book-item-footer,
+.book-cover-item .book-item-action,
+.book-cover-item > div:last-child:not([class*="cover"]):not([class*="title"]),
+.book-card-item > div:last-child:not([class*="cover"]):not([class*="title"]) {
+  padding: 2px 4px !important;
+  margin-top: 2px !important;
+  color: #dfd2bf !important;
+  font-size: 11.5px !important;
+}
+
+/* 列表模式下的书目卡片适配 */
+.book-list-mode .book-list-item,
+[class*="list-item-container"] {
+  background: var(--moyun-paper) !important;
+  color: var(--moyun-ink) !important;
+  border: 1px solid var(--moyun-border) !important;
+  border-radius: 10px !important;
+  box-shadow: 0 3px 10px rgba(24, 14, 6, 0.18) !important;
+}
+
+/* 8. 阅读进度条与角标：墨韵森林绿 */
+[class*="progress-bar"],
+.book-item-progress {
+  accent-color: var(--moyun-accent) !important;
+}
+
+/* 9. 弹出窗口 / 设置面板圆角 */
+.setting-dialog,
+.dialog-container,
+[class*="modal"],
+[class*="dialog"] {
+  border-radius: 14px !important;
+}
+
+/* 10. 胡桃木质细腻滚动条 */
+::-webkit-scrollbar {
+  width: 7px !important;
+  height: 7px !important;
+}
+::-webkit-scrollbar-track {
+  background: transparent !important;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(93, 68, 46, 0.35) !important;
+  border-radius: 999px !important;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(93, 68, 46, 0.58) !important;
+}

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BookOpen,
+  Cloud,
   Download,
   FolderCheck,
   FolderOpen,
@@ -8,14 +9,17 @@ import {
   HelpCircle,
   PanelRightOpen,
   Plus,
+  RefreshCw,
   Search,
   Sparkles,
+  Upload,
 } from 'lucide-react';
 import type {
   BookMetadata,
   ParsedBook,
   QuickActionType,
   ReaderPrefs,
+  WebDavConfig,
 } from './types/bookshelf';
 import {
   computeReadingStats,
@@ -30,15 +34,29 @@ import {
 import {
   exportLibraryZip,
   FolderSync,
+  importLibraryFromFolderFiles,
+  importLibraryZip,
   loadAssistantCollapsed,
   loadBooksFromLocalStorage,
+  loadDeletedBookIds,
   loadReaderPrefs,
+  loadWebDavConfig,
   LocalShelfDB,
   saveAssistantCollapsed,
   saveBooksToLocalStorage,
+  saveDeletedBookIds,
   saveReaderPrefs,
+  saveWebDavConfig,
   type FolderSyncState,
 } from './services/localStorageDb';
+import {
+  deleteWebDavFile,
+  downloadWebDavFile,
+  mergeBookLibraries,
+  readWebDavBooksJson,
+  uploadWebDavFile,
+  writeWebDavBooksJson,
+} from './services/webdavSync';
 import { StatsBar } from './components/StatsBar';
 import {
   BookshelfGrid,
@@ -53,6 +71,7 @@ import {
   FolderGuideModal,
   UploadBookModal,
 } from './components/Modals';
+import { WebDavModal } from './components/WebDavModal';
 
 interface ToastItem {
   id: number;
@@ -82,6 +101,9 @@ export default function App() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [editingBook, setEditingBook] = useState<BookMetadata | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
+  const [webdavConfig, setWebdavConfig] = useState<WebDavConfig>(() => loadWebDavConfig());
+  const [webdavOpen, setWebdavOpen] = useState(false);
+  const [webdavSyncing, setWebdavSyncing] = useState(false);
   const [confirmState, setConfirmState] = useState<{
     open: boolean;
     title: string;
@@ -107,11 +129,19 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const coverUrlCacheRef = useRef<Map<string, string>>(new Map());
   const booksRef = useRef<BookMetadata[]>(books);
+  const deletedIdsRef = useRef<Record<string, number>>(loadDeletedBookIds());
+  const webdavConfigRef = useRef<WebDavConfig>(webdavConfig);
   const autoSaveTimerRef = useRef<number | null>(null);
+  const webdavPushTimerRef = useRef<number | null>(null);
+  const importZipInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     booksRef.current = books;
   }, [books]);
+
+  useEffect(() => {
+    webdavConfigRef.current = webdavConfig;
+  }, [webdavConfig]);
 
   const showToast = useCallback((message: string, duration = 2600) => {
     const id = Date.now() + Math.random();
@@ -128,6 +158,17 @@ export default function App() {
       saveBooksToLocalStorage(nextBooks);
       if (syncDisk && FolderSync.isConnected()) {
         await FolderSync.writeBooksJson(nextBooks);
+      }
+      const dav = webdavConfigRef.current;
+      if (syncDisk && dav.enabled && dav.autoSync && dav.url) {
+        if (webdavPushTimerRef.current) {
+          window.clearTimeout(webdavPushTimerRef.current);
+        }
+        webdavPushTimerRef.current = window.setTimeout(() => {
+          writeWebDavBooksJson(dav, booksRef.current, deletedIdsRef.current).catch(() => {
+            // ignore silent background sync failure while offline
+          });
+        }, 650);
       }
     },
     []
@@ -172,6 +213,79 @@ export default function App() {
     setFolderState(FolderSync.getState());
   }, [persistBooks]);
 
+  const syncWithWebDav = useCallback(
+    async (cfgOverride?: WebDavConfig, silent = false) => {
+      const cfg = cfgOverride || webdavConfigRef.current;
+      if (!cfg.enabled || !cfg.url) return;
+
+      setWebdavSyncing(true);
+      try {
+        const remote = await readWebDavBooksJson(cfg);
+        const { mergedBooks, mergedDeletedIds, toUploadToRemote } = mergeBookLibraries(
+          booksRef.current,
+          remote?.books || [],
+          deletedIdsRef.current,
+          remote?.deletedIds || {}
+        );
+
+        for (const book of toUploadToRemote) {
+          let cov = await LocalShelfDB.get<Blob>('covers', book.id);
+          if (!cov && FolderSync.isConnected() && book.coverPath) {
+            cov = (await FolderSync.readFileFromSubDir('cover', book.coverPath)) || undefined;
+          }
+          if (cov && book.coverPath) {
+            await uploadWebDavFile(cfg, book.coverPath, cov);
+          }
+
+          let bf = await LocalShelfDB.get<Blob>('bookfiles', book.id);
+          if (!bf && FolderSync.isConnected() && book.filePath) {
+            bf = (await FolderSync.readFileFromSubDir('bookfile', book.filePath)) || undefined;
+          }
+          if (bf && book.filePath) {
+            await uploadWebDavFile(cfg, book.filePath, bf);
+          }
+        }
+
+        deletedIdsRef.current = mergedDeletedIds;
+        saveDeletedBookIds(mergedDeletedIds);
+
+        await writeWebDavBooksJson(cfg, mergedBooks, mergedDeletedIds);
+
+        for (const url of coverUrlCacheRef.current.values()) {
+          URL.revokeObjectURL(url);
+        }
+        coverUrlCacheRef.current.clear();
+
+        booksRef.current = mergedBooks;
+        setBooks(mergedBooks);
+        saveBooksToLocalStorage(mergedBooks);
+        if (FolderSync.isConnected()) {
+          await FolderSync.writeBooksJson(mergedBooks);
+        }
+
+        const stamp = new Date().toLocaleString('zh-CN', { hour12: false });
+        const updatedCfg: WebDavConfig = { ...cfg, lastSyncAt: stamp };
+        webdavConfigRef.current = updatedCfg;
+        setWebdavConfig(updatedCfg);
+        saveWebDavConfig(updatedCfg);
+
+        if (!silent) {
+          showToast(`WebDAV 同步完成（共 ${mergedBooks.length} 本书）`);
+        }
+      } catch (err) {
+        if (!silent) {
+          showToast(
+            `WebDAV 同步失败：${err instanceof Error ? err.message : '请检查网络与跨域设置'}`,
+            3800
+          );
+        }
+      } finally {
+        setWebdavSyncing(false);
+      }
+    },
+    [showToast]
+  );
+
   useEffect(() => {
     let active = true;
     FolderSync.tryRestoreSavedHandle(false).then(async (restored) => {
@@ -180,11 +294,19 @@ export default function App() {
       if (restored) {
         await syncWithConnectedFolder();
       }
+      if (
+        active &&
+        webdavConfigRef.current.enabled &&
+        webdavConfigRef.current.autoSync &&
+        webdavConfigRef.current.url
+      ) {
+        await syncWithWebDav(webdavConfigRef.current, true);
+      }
     });
     return () => {
       active = false;
     };
-  }, [syncWithConnectedFolder]);
+  }, [syncWithConnectedFolder, syncWithWebDav]);
 
   const handleBindOrReconnectFolder = async () => {
     if (FolderSync.hasSavedHandle() && !FolderSync.isConnected()) {
@@ -202,6 +324,9 @@ export default function App() {
     if (res.ok) {
       await syncWithConnectedFolder();
       showToast('已绑定本地文件夹，cover / bookfile / data 目录已就绪');
+    } else if (res.blockedByIframe) {
+      setGuideOpen(true);
+      showToast('预览框内受浏览器安全策略限制，已打开引导窗口', 3200);
     } else if (res.error) {
       showToast(res.error, 3800);
     }
@@ -216,6 +341,13 @@ export default function App() {
       const diskFile = await FolderSync.readFileFromSubDir('cover', book.coverPath);
       if (diskFile) {
         blob = diskFile;
+        await LocalShelfDB.put('covers', book.id, blob);
+      }
+    }
+    if (!blob && webdavConfigRef.current.enabled && webdavConfigRef.current.url && book.coverPath) {
+      const remoteBlob = await downloadWebDavFile(webdavConfigRef.current, book.coverPath);
+      if (remoteBlob) {
+        blob = remoteBlob;
         await LocalShelfDB.put('covers', book.id, blob);
       }
     }
@@ -264,7 +396,7 @@ export default function App() {
     if (coverFile) {
       coverExt = (coverFile.name.split('.').pop() || 'png').toLowerCase();
     } else {
-      if (['epub', 'pdf', 'mobi', 'azw', 'azw3', 'prc', 'fb2', 'cbz'].includes(ext)) {
+      if (['epub', 'pdf', 'mobi', 'azw', 'azw3', 'prc', 'mbpv2', 'mbp', 'fb2', 'cbz'].includes(ext)) {
         try {
           const ab = await bookFile.arrayBuffer();
           const res = await parseBookFile(ab, ext, true);
@@ -289,6 +421,17 @@ export default function App() {
       await FolderSync.writeFileToSubDir('bookfile', filePath, bookFile);
       await FolderSync.writeFileToSubDir('cover', coverPath, resolvedCoverBlob);
     }
+    if (webdavConfigRef.current.enabled && webdavConfigRef.current.url) {
+      try {
+        await uploadWebDavFile(webdavConfigRef.current, filePath, bookFile);
+        await uploadWebDavFile(webdavConfigRef.current, coverPath, resolvedCoverBlob);
+      } catch (err) {
+        showToast(
+          `本地已保存，但上传至 WebDAV 失败：${err instanceof Error ? err.message : '网络错误'}`,
+          3500
+        );
+      }
+    }
 
     const newBook: BookMetadata = {
       id,
@@ -309,8 +452,8 @@ export default function App() {
     const nextBooks = [newBook, ...booksRef.current];
     await persistBooks(nextBooks, true);
     showToast(
-      FolderSync.isConnected()
-        ? '已保存至本地文件夹（cover / bookfile / data）'
+      FolderSync.isConnected() || webdavConfigRef.current.enabled
+        ? '已保存并同步书籍（cover / bookfile / data）'
         : '已加入本地书架'
     );
   };
@@ -340,6 +483,10 @@ export default function App() {
         if (oldPath) await FolderSync.deleteFileFromSubDir('cover', oldPath);
         await FolderSync.writeFileToSubDir('cover', updatedCoverPath, newCover);
       }
+      if (webdavConfigRef.current.enabled && webdavConfigRef.current.url) {
+        if (oldPath) await deleteWebDavFile(webdavConfigRef.current, oldPath);
+        await uploadWebDavFile(webdavConfigRef.current, updatedCoverPath, newCover).catch(() => {});
+      }
     }
 
     const nextBooks = booksRef.current.map((b) =>
@@ -359,6 +506,12 @@ export default function App() {
       onConfirm: async () => {
         setConfirmState((prev) => ({ ...prev, open: false }));
         const nextBooks = booksRef.current.filter((b) => b.id !== book.id);
+        deletedIdsRef.current = {
+          ...deletedIdsRef.current,
+          [book.id]: Date.now(),
+        };
+        saveDeletedBookIds(deletedIdsRef.current);
+
         await LocalShelfDB.del('covers', book.id);
         await LocalShelfDB.del('bookfiles', book.id);
 
@@ -371,6 +524,10 @@ export default function App() {
         if (FolderSync.isConnected()) {
           await FolderSync.deleteFileFromSubDir('cover', book.coverPath);
           await FolderSync.deleteFileFromSubDir('bookfile', book.filePath);
+        }
+        if (webdavConfigRef.current.enabled && webdavConfigRef.current.url) {
+          await deleteWebDavFile(webdavConfigRef.current, book.coverPath);
+          await deleteWebDavFile(webdavConfigRef.current, book.filePath);
         }
 
         await persistBooks(nextBooks, true);
@@ -467,9 +624,17 @@ export default function App() {
         await LocalShelfDB.put('bookfiles', book.id, diskFile);
       }
     }
+    if (!fileBlob && webdavConfigRef.current.enabled && webdavConfigRef.current.url && book.filePath) {
+      showToast('正在从 WebDAV 网盘缓存电子书...');
+      const remoteFile = await downloadWebDavFile(webdavConfigRef.current, book.filePath);
+      if (remoteFile) {
+        fileBlob = remoteFile;
+        await LocalShelfDB.put('bookfiles', book.id, remoteFile);
+      }
+    }
 
     if (!fileBlob) {
-      showToast('未找到电子书原文件，请检查本地 bookfile 目录或重新上传');
+      showToast('未找到电子书原文件，请检查本地 bookfile 目录、WebDAV 连接或重新上传');
       return;
     }
 
@@ -573,6 +738,44 @@ export default function App() {
     showToast('已导出完整三目录本地书库 ZIP 包');
   };
 
+  const handleImportZip = async (zipFile: File) => {
+    try {
+      showToast('正在解析并导入本地书库 ZIP 包...');
+      const res = await importLibraryZip(zipFile, booksRef.current);
+      for (const url of coverUrlCacheRef.current.values()) {
+        URL.revokeObjectURL(url);
+      }
+      coverUrlCacheRef.current.clear();
+      booksRef.current = res.books;
+      setBooks(res.books);
+      showToast(`已成功导入 ${res.importedCount} 本书籍、封面与阅读进度`);
+    } catch (err) {
+      showToast(
+        `导入书库失败：${err instanceof Error ? err.message : 'ZIP 格式无效'}`,
+        3800
+      );
+    }
+  };
+
+  const handleImportFolder = async (fileList: FileList) => {
+    try {
+      showToast('正在读取本地书库文件夹...');
+      const res = await importLibraryFromFolderFiles(fileList, booksRef.current);
+      for (const url of coverUrlCacheRef.current.values()) {
+        URL.revokeObjectURL(url);
+      }
+      coverUrlCacheRef.current.clear();
+      booksRef.current = res.books;
+      setBooks(res.books);
+      showToast(`已从本地文件夹导入 ${res.importedCount} 本书籍与进度`);
+    } catch (err) {
+      showToast(
+        `读取文件夹失败：${err instanceof Error ? err.message : '目录格式不符合'}`,
+        3800
+      );
+    }
+  };
+
   const folderButtonConfig = (() => {
     if (folderState.status === 'connected') {
       return {
@@ -650,11 +853,58 @@ export default function App() {
 
                 <button
                   type="button"
+                  onClick={() => setWebdavOpen(true)}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12.5px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                    webdavConfig.enabled
+                      ? 'bg-[#e6efe8] text-[#3a5742] border-[#c4d6c8]'
+                      : 'bg-[#fbf7ef] text-[#261e17] border-[#d6c8b4] hover:bg-[#ede5d8]'
+                  }`}
+                >
+                  <Cloud className="w-3.5 h-3.5" />
+                  {webdavConfig.enabled ? 'WebDAV 已连接' : 'WebDAV 网盘'}
+                </button>
+
+                {webdavConfig.enabled && (
+                  <button
+                    type="button"
+                    disabled={webdavSyncing}
+                    onClick={() => syncWithWebDav()}
+                    title="立即与 WebDAV 网盘双向同步"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[#c4d6c8] bg-white hover:bg-[#e6efe8] disabled:opacity-60 text-[12.5px] font-medium text-[#3a5742] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${webdavSyncing ? 'animate-spin' : ''}`} />
+                    同步
+                  </button>
+                )}
+
+                <button
+                  type="button"
                   onClick={() => setGuideOpen(true)}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#d6c8b4] bg-white hover:bg-[#ede5d8] text-[12.5px] font-medium text-[#6b5d4f] hover:text-[#261e17] transition-colors cursor-pointer whitespace-nowrap shrink-0"
                 >
                   <HelpCircle className="w-3.5 h-3.5" />
                   本地目录说明
+                </button>
+
+                <input
+                  ref={importZipInputRef}
+                  type="file"
+                  accept=".zip"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = '';
+                    if (f) handleImportZip(f);
+                  }}
+                />
+
+                <button
+                  type="button"
+                  onClick={() => importZipInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#d6c8b4] bg-white hover:bg-[#ede5d8] text-[12.5px] font-medium text-[#261e17] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  导入书库
                 </button>
 
                 <button
@@ -779,6 +1029,15 @@ export default function App() {
         )}
       </div>
 
+      {/* Mobile / Tablet Backdrop for Slide-Over Doubao Drawer */}
+      {!assistantCollapsed && (
+        <div
+          aria-hidden="true"
+          onClick={() => toggleAssistant(true)}
+          className="fixed inset-0 z-30 bg-black/30 backdrop-blur-[1px] md:hidden"
+        />
+      )}
+
       {/* Right Fixed & Collapsible Doubao Assistant Sidebar */}
       <DoubaoAssistantPanel
         collapsed={assistantCollapsed}
@@ -832,9 +1091,32 @@ export default function App() {
         open={guideOpen}
         folderName={folderState.folderName}
         isSupported={FolderSync.isSupported()}
+        iframeBlocked={FolderSync.isCrossOriginIframe()}
         onClose={() => setGuideOpen(false)}
         onBindFolder={handleBindOrReconnectFolder}
         onExportZip={handleExportZip}
+        onImportZip={handleImportZip}
+        onImportFolder={handleImportFolder}
+      />
+
+      <WebDavModal
+        open={webdavOpen}
+        config={webdavConfig}
+        syncing={webdavSyncing}
+        onClose={() => setWebdavOpen(false)}
+        onSaveAndSync={async (nextCfg) => {
+          webdavConfigRef.current = nextCfg;
+          setWebdavConfig(nextCfg);
+          saveWebDavConfig(nextCfg);
+          await syncWithWebDav(nextCfg, false);
+        }}
+        onDisconnect={() => {
+          const disabled: WebDavConfig = { ...webdavConfigRef.current, enabled: false };
+          webdavConfigRef.current = disabled;
+          setWebdavConfig(disabled);
+          saveWebDavConfig(disabled);
+          showToast('已断开 WebDAV 同步，本地书架不受影响');
+        }}
       />
 
       <ConfirmModal

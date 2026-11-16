@@ -1,0 +1,48 @@
+name: Build Multi-Platform Desktop Apps
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+            artifact_pattern: release/*.exe
+          - os: macos-latest
+            platform: mac
+            artifact_pattern: release/*.dmg
+          - os: ubuntu-latest
+            platform: linux
+            artifact_pattern: release/*.AppImage
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install project dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Install Electron & electron-builder
+        run: npm install -D --legacy-peer-deps electron electron-builder
+
+      - name: Build web assets
+        run: npm run build
+
+      - name: Package desktop app (${{ matrix.platform }})
+        run: npx electron-builder --${{ matrix.platform }} --config electron-builder.json
+
+      - name: Upload desktop artifacts (${{ matrix.platform }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: moyun-bookshelf-${{ matrix.platform }}
+          path: ${{ matrix.artifact_pattern }}

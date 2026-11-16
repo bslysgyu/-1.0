@@ -25,6 +25,28 @@
       }
     ]
   },
+  "mac": {
+    "category": "public.app-category.books",
+    "target": [
+      {
+        "target": "dmg",
+        "arch": ["x64", "arm64"]
+      },
+      {
+        "target": "zip",
+        "arch": ["x64", "arm64"]
+      }
+    ]
+  },
+  "linux": {
+    "category": "Education",
+    "target": [
+      {
+        "target": "AppImage",
+        "arch": ["x64"]
+      }
+    ]
+  },
   "portable": {
     "artifactName": "墨韵书架_便携版_${version}.exe"
   },

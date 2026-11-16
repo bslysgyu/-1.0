@@ -94,6 +94,23 @@ async function createMainWindow() {
     callback(true);
   });
 
+  // Enable Electron desktop app to connect to LAN/NAS WebDAV servers even without server-side CORS headers
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    if (!details.url.startsWith(`http://localhost:${port}`)) {
+      const responseHeaders = { ...(details.responseHeaders || {}) };
+      responseHeaders['access-control-allow-origin'] = ['*'];
+      responseHeaders['access-control-allow-methods'] = [
+        'GET, PUT, POST, DELETE, MKCOL, PROPFIND, OPTIONS, HEAD',
+      ];
+      responseHeaders['access-control-allow-headers'] = [
+        'Authorization, Content-Type, Depth, Overwrite, Destination, Cache-Control',
+      ];
+      callback({ responseHeaders });
+      return;
+    }
+    callback({ responseHeaders: details.responseHeaders });
+  });
+
   await win.loadURL(`http://localhost:${port}/`);
 }
 

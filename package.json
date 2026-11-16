@@ -8,7 +8,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "build:win": "vite build && npx electron-builder --win --config electron-builder.json",
+    "build:mac": "vite build && npx electron-builder --mac --config electron-builder.json",
+    "build:linux": "vite build && npx electron-builder --linux --config electron-builder.json"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

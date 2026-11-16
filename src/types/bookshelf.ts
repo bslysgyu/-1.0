@@ -5,6 +5,8 @@ export type BookFormat =
   | 'azw3'
   | 'azw'
   | 'prc'
+  | 'mbpv2'
+  | 'mbp'
   | 'txt'
   | 'docx'
   | 'fb2'
@@ -19,6 +21,8 @@ export const SUPPORTED_BOOK_EXTENSIONS: BookFormat[] = [
   'azw3',
   'azw',
   'prc',
+  'mbpv2',
+  'mbp',
   'txt',
   'docx',
   'fb2',
@@ -112,3 +116,12 @@ export interface ChatMessage {
 }
 
 export type QuickActionType = 'explain' | 'summarize' | 'notes' | 'analyze' | 'review';
+
+export interface WebDavConfig {
+  enabled: boolean;
+  url: string;
+  username: string;
+  password: string;
+  autoSync: boolean;
+  lastSyncAt?: string;
+}
