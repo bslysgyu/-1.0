@@ -13,6 +13,7 @@ import { generateDefaultCoverBlob, parseBookFile } from '../utils/bookParser';
 const LS_BOOKS_META = 'local_shelf_books_meta_v1';
 const LS_DELETED_IDS = 'local_shelf_deleted_ids_v1';
 const LS_IGNORED_SOURCES = 'local_shelf_ignored_sources_v1';
+const LS_TRACKED_FOLDER_BOOKS = 'local_shelf_folder_tracked_v1';
 const LS_READER_PREFS = 'local_shelf_reader_prefs_v1';
 const LS_UI_STATE = 'local_shelf_ui_state_v1';
 const LS_WEBDAV_CFG = 'local_shelf_webdav_config_v1';
@@ -129,6 +130,10 @@ class FolderSyncService {
 
   hasSavedHandle(): boolean {
     return !!this.rootHandle;
+  }
+
+  getRootHandle(): ExtendedDirectoryHandle | null {
+    return this.rootHandle;
   }
 
   private async ensureSubDirs(root: ExtendedDirectoryHandle) {
@@ -312,10 +317,10 @@ class FolderSyncService {
       inBookfileDir: boolean,
       depth: number
     ) => {
-      if (depth > 4) return;
+      if (depth > 6) return;
       try {
         for await (const [name, handle] of dirHandle.entries()) {
-          if (!name || name.startsWith('.')) continue;
+          if (!name || name.startsWith('.') || name.startsWith('~$')) continue;
           const lowerName = name.toLowerCase();
           if (handle.kind === 'directory') {
             if (!prefix && (lowerName === 'cover' || lowerName === 'data')) {
@@ -330,6 +335,7 @@ class FolderSyncService {
             const ext = rawExt === 'markdown' ? 'md' : rawExt === 'htm' ? 'html' : rawExt;
             try {
               const file = await (handle as FileSystemFileHandle).getFile();
+              if (file.size <= 0) continue;
               const relPath = prefix ? `${prefix}/${name}` : name;
               results.push({
                 file,
@@ -426,6 +432,31 @@ export function loadIgnoredSourceKeys(): string[] {
 export function saveIgnoredSourceKeys(keys: string[]): void {
   try {
     localStorage.setItem(LS_IGNORED_SOURCES, JSON.stringify(keys.slice(-500)));
+  } catch {
+    // ignore quota errors
+  }
+}
+
+export function loadTrackedFolderBookIds(folderName: string): Set<string> {
+  if (!folderName) return new Set();
+  try {
+    const raw = localStorage.getItem(LS_TRACKED_FOLDER_BOOKS);
+    const parsed = raw ? JSON.parse(raw) : {};
+    const list = parsed && typeof parsed === 'object' ? parsed[folderName] : null;
+    return Array.isArray(list) ? new Set(list.filter((v): v is string => typeof v === 'string')) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+export function saveTrackedFolderBookIds(folderName: string, ids: Set<string>): void {
+  if (!folderName) return;
+  try {
+    const raw = localStorage.getItem(LS_TRACKED_FOLDER_BOOKS);
+    const parsed = raw ? JSON.parse(raw) : {};
+    const next = parsed && typeof parsed === 'object' ? { ...parsed } : {};
+    next[folderName] = Array.from(ids);
+    localStorage.setItem(LS_TRACKED_FOLDER_BOOKS, JSON.stringify(next));
   } catch {
     // ignore quota errors
   }
@@ -728,6 +759,8 @@ export async function importLibraryFromFolderFiles(
   );
 
   for (const [subPath, f] of byRelPath.entries()) {
+    const baseName = subPath.split('/').pop() || '';
+    if (baseName.startsWith('.') || baseName.startsWith('~$') || f.size <= 0) continue;
     const lowerPath = subPath.toLowerCase();
     if (lowerPath.startsWith('cover/') || lowerPath.startsWith('data/')) continue;
     const rawExt = lowerPath.split('.').pop() || '';

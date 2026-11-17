@@ -42,6 +42,7 @@ import {
   loadDeletedBookIds,
   loadIgnoredSourceKeys,
   loadReaderPrefs,
+  loadTrackedFolderBookIds,
   loadWebDavConfig,
   LocalShelfDB,
   saveAssistantCollapsed,
@@ -49,6 +50,7 @@ import {
   saveDeletedBookIds,
   saveIgnoredSourceKeys,
   saveReaderPrefs,
+  saveTrackedFolderBookIds,
   saveWebDavConfig,
   type FolderSyncState,
 } from './services/localStorageDb';
@@ -181,21 +183,144 @@ export default function App() {
     []
   );
 
-  const scanConnectedFolderForNewBooks = useCallback(
-    async (silent = false): Promise<number> => {
-      if (!FolderSync.isConnected() || folderScanningRef.current) return 0;
+  const syncConnectedFolderChanges = useCallback(
+    async (silent = false): Promise<{ added: number; removed: number }> => {
+      if (!FolderSync.isConnected() || folderScanningRef.current) {
+        return { added: 0, removed: 0 };
+      }
+      const folderName = FolderSync.getState().folderName;
+      if (!folderName) return { added: 0, removed: 0 };
+
       folderScanningRef.current = true;
       setFolderScanning(true);
 
       try {
-        const scanned = await FolderSync.scanBookFiles();
+        let scanned = await FolderSync.scanBookFiles();
         const current = booksRef.current;
-        const knownFilePaths = new Set(current.map((b) => b.filePath));
-        const knownSourceKeys = new Set(
+
+        const preKnownPaths = new Set(current.map((b) => b.filePath));
+        const preKnownSources = new Set(
           current.map((b) => b.sourceKey).filter((v): v is string => Boolean(v))
         );
+
+        // If any brand-new large file (>2MB) just appeared, wait briefly to ensure OS copy finished
+        const hasNewLargeFile = scanned.some(
+          (item) =>
+            item.file.size > 2 * 1024 * 1024 &&
+            !preKnownPaths.has(item.relPath) &&
+            !preKnownSources.has(item.sourceKey) &&
+            !ignoredSourcesRef.current.has(item.sourceKey)
+        );
+        if (hasNewLargeFile) {
+          await new Promise((r) => setTimeout(r, 350));
+          scanned = await FolderSync.scanBookFiles();
+        }
+
+        const scannedRelPaths = new Set(scanned.map((item) => item.relPath));
+        const scannedByRelPath = new Map(scanned.map((item) => [item.relPath, item]));
+
+        // Prune ignored source keys whose underlying file is no longer in the folder
+        let ignoredChanged = false;
+        for (const key of Array.from(ignoredSourcesRef.current)) {
+          const splitIdx = key.lastIndexOf('::');
+          const keyRelPath = splitIdx > 0 ? key.slice(0, splitIdx) : key;
+          if (!scannedRelPaths.has(keyRelPath)) {
+            ignoredSourcesRef.current.delete(key);
+            ignoredChanged = true;
+          }
+        }
+        if (ignoredChanged) {
+          saveIgnoredSourceKeys(Array.from(ignoredSourcesRef.current));
+        }
+
+        const trackedIds = loadTrackedFolderBookIds(folderName);
+        let trackedChanged = false;
+
+        // 1. Detect books deleted (or replaced with new size) in the bound folder
+        const removedBooks: BookMetadata[] = [];
+        const survivingBooks: BookMetadata[] = [];
+        const currentNow = booksRef.current;
+
+        for (const book of currentNow) {
+          const splitIdx = book.sourceKey ? book.sourceKey.lastIndexOf('::') : -1;
+          const sourceRelPath =
+            book.sourceKey && splitIdx > 0 ? book.sourceKey.slice(0, splitIdx) : '';
+          const isFolderTracked = trackedIds.has(book.id) || Boolean(book.sourceKey);
+
+          if (!isFolderTracked) {
+            survivingBooks.push(book);
+            continue;
+          }
+
+          const hasExternalSource = Boolean(sourceRelPath && sourceRelPath !== book.filePath);
+          const sourceEntry = hasExternalSource ? scannedByRelPath.get(sourceRelPath) : undefined;
+          const sourceDeletedOrReplaced =
+            hasExternalSource && (!sourceEntry || sourceEntry.sourceKey !== book.sourceKey);
+          const managedFileDeleted = Boolean(book.filePath && !scannedRelPaths.has(book.filePath));
+
+          if (sourceDeletedOrReplaced || managedFileDeleted) {
+            removedBooks.push(book);
+            // If user deleted only the bookfile/ copy while keeping the root file, ignore root file so it won't re-add immediately
+            if (managedFileDeleted && hasExternalSource && sourceEntry && book.sourceKey) {
+              ignoredSourcesRef.current.add(book.sourceKey);
+              saveIgnoredSourceKeys(Array.from(ignoredSourcesRef.current));
+            }
+          } else {
+            survivingBooks.push(book);
+            if (book.filePath && scannedRelPaths.has(book.filePath) && !trackedIds.has(book.id)) {
+              trackedIds.add(book.id);
+              trackedChanged = true;
+            }
+          }
+        }
+
+        // Clean up removed books from IndexedDB, folder copies, and WebDAV
+        for (const book of removedBooks) {
+          if (trackedIds.delete(book.id)) {
+            trackedChanged = true;
+          }
+          deletedIdsRef.current = {
+            ...deletedIdsRef.current,
+            [book.id]: Date.now(),
+          };
+
+          await LocalShelfDB.del('covers', book.id);
+          await LocalShelfDB.del('bookfiles', book.id);
+
+          const cachedUrl = coverUrlCacheRef.current.get(book.id);
+          if (cachedUrl) {
+            URL.revokeObjectURL(cachedUrl);
+            coverUrlCacheRef.current.delete(book.id);
+          }
+
+          if (book.coverPath) {
+            await FolderSync.deleteFileFromSubDir('cover', book.coverPath);
+          }
+          if (book.filePath && scannedRelPaths.has(book.filePath)) {
+            await FolderSync.deleteFileFromSubDir('bookfile', book.filePath);
+          }
+          if (webdavConfigRef.current.enabled && webdavConfigRef.current.url) {
+            if (book.coverPath) {
+              await deleteWebDavFile(webdavConfigRef.current, book.coverPath).catch(() => {});
+            }
+            if (book.filePath) {
+              await deleteWebDavFile(webdavConfigRef.current, book.filePath).catch(() => {});
+            }
+          }
+        }
+        if (removedBooks.length > 0) {
+          saveDeletedBookIds(deletedIdsRef.current);
+        }
+
+        // 2. Detect newly added books in the bound folder
+        const knownFilePaths = new Set(survivingBooks.map((b) => b.filePath));
+        const knownSourceKeys = new Set(
+          survivingBooks.map((b) => b.sourceKey).filter((v): v is string => Boolean(v))
+        );
         const knownNameSize = new Set(
-          current.map((b) => `${(b.filePath.split('/').pop() || '').toLowerCase()}::${b.fileSize}`)
+          survivingBooks.map(
+            (b) => `${(b.filePath.split('/').pop() || '').toLowerCase()}::${b.fileSize}`
+          )
         );
 
         const newItems = scanned.filter((item) => {
@@ -211,14 +336,7 @@ export default function App() {
           return true;
         });
 
-        if (newItems.length === 0) {
-          if (!silent) {
-            showToast('本地文件夹已是最新，未发现新放入的电子书');
-          }
-          return 0;
-        }
-
-        if (!silent) {
+        if (newItems.length > 0 && !silent) {
           showToast(`发现 ${newItems.length} 本新图书，正在解析封面并上架...`);
         }
 
@@ -268,6 +386,9 @@ export default function App() {
             );
           }
 
+          trackedIds.add(id);
+          trackedChanged = true;
+
           addedBooks.push({
             id,
             title,
@@ -286,10 +407,26 @@ export default function App() {
           });
         }
 
-        const nextBooks = [...addedBooks, ...booksRef.current];
-        await persistBooks(nextBooks, true);
-        showToast(`已自动识别并上架 ${addedBooks.length} 本新书`);
-        return addedBooks.length;
+        if (trackedChanged) {
+          saveTrackedFolderBookIds(folderName, trackedIds);
+        }
+
+        if (addedBooks.length > 0 || removedBooks.length > 0) {
+          const nextBooks = [...addedBooks, ...survivingBooks];
+          await persistBooks(nextBooks, true);
+
+          if (addedBooks.length > 0 && removedBooks.length > 0) {
+            showToast(`文件夹同步：新增 ${addedBooks.length} 本，移除 ${removedBooks.length} 本`);
+          } else if (addedBooks.length > 0) {
+            showToast(`检测到文件夹新增 ${addedBooks.length} 本图书，已自动上架`);
+          } else {
+            showToast(`检测到文件夹移除了 ${removedBooks.length} 本图书，已从书架删除`);
+          }
+        } else if (!silent) {
+          showToast('本地文件夹已是最新，未发现新增或删除的图书');
+        }
+
+        return { added: addedBooks.length, removed: removedBooks.length };
       } finally {
         folderScanningRef.current = false;
         setFolderScanning(false);
@@ -300,13 +437,27 @@ export default function App() {
 
   const syncWithConnectedFolder = useCallback(async () => {
     if (!FolderSync.isConnected()) return;
+    const folderName = FolderSync.getState().folderName;
+    const trackedIds = loadTrackedFolderBookIds(folderName);
+    let trackedChanged = false;
+
     const diskData = await FolderSync.readBooksJson();
     const currentLocal = booksRef.current;
 
     if (diskData && Array.isArray(diskData.books) && diskData.books.length > 0) {
+      const scannedNow = await FolderSync.scanBookFiles();
+      const scannedPaths = new Set(scannedNow.map((s) => s.relPath));
+
       const diskMap = new Map(diskData.books.map((b) => [b.id, b]));
+      for (const diskBook of diskData.books) {
+        if (diskBook.filePath && scannedPaths.has(diskBook.filePath) && !trackedIds.has(diskBook.id)) {
+          trackedIds.add(diskBook.id);
+          trackedChanged = true;
+        }
+      }
+
       for (const localBook of currentLocal) {
-        if (!diskMap.has(localBook.id)) {
+        if (!diskMap.has(localBook.id) && !trackedIds.has(localBook.id)) {
           diskMap.set(localBook.id, localBook);
           const cov = await LocalShelfDB.get<Blob>('covers', localBook.id);
           if (cov && localBook.coverPath) {
@@ -315,6 +466,8 @@ export default function App() {
           const bf = await LocalShelfDB.get<Blob>('bookfiles', localBook.id);
           if (bf && localBook.filePath) {
             await FolderSync.writeFileToSubDir('bookfile', localBook.filePath, bf);
+            trackedIds.add(localBook.id);
+            trackedChanged = true;
           }
         }
       }
@@ -323,6 +476,7 @@ export default function App() {
       await persistBooks(merged, true);
     } else {
       for (const b of currentLocal) {
+        if (trackedIds.has(b.id)) continue;
         const cov = await LocalShelfDB.get<Blob>('covers', b.id);
         if (cov && b.coverPath) {
           await FolderSync.writeFileToSubDir('cover', b.coverPath, cov);
@@ -330,13 +484,20 @@ export default function App() {
         const bf = await LocalShelfDB.get<Blob>('bookfiles', b.id);
         if (bf && b.filePath) {
           await FolderSync.writeFileToSubDir('bookfile', b.filePath, bf);
+          trackedIds.add(b.id);
+          trackedChanged = true;
         }
       }
       await persistBooks(currentLocal, true);
     }
-    await scanConnectedFolderForNewBooks(true);
+
+    if (trackedChanged && folderName) {
+      saveTrackedFolderBookIds(folderName, trackedIds);
+    }
+
+    await syncConnectedFolderChanges(true);
     setFolderState(FolderSync.getState());
-  }, [persistBooks, scanConnectedFolderForNewBooks]);
+  }, [persistBooks, syncConnectedFolderChanges]);
 
   const syncWithWebDav = useCallback(
     async (cfgOverride?: WebDavConfig, silent = false) => {
@@ -433,23 +594,69 @@ export default function App() {
     };
   }, [syncWithConnectedFolder, syncWithWebDav]);
 
-  // Automatically scan connected folder for newly dropped books whenever returning to the window
+  // Automatically watch bound folder for additions & deletions (focus + polling + FileSystemObserver)
   useEffect(() => {
+    if (folderState.status !== 'connected') return;
+
     const maybeScan = () => {
       if (!FolderSync.isConnected()) return;
       if (document.visibilityState === 'hidden') return;
       const now = Date.now();
-      if (now - lastFocusScanRef.current < 2500) return;
+      if (now - lastFocusScanRef.current < 1500) return;
       lastFocusScanRef.current = now;
-      scanConnectedFolderForNewBooks(true);
+      void syncConnectedFolderChanges(true);
     };
+
     window.addEventListener('focus', maybeScan);
     document.addEventListener('visibilitychange', maybeScan);
+
+    const intervalId = window.setInterval(() => {
+      if (!FolderSync.isConnected() || document.visibilityState === 'hidden') return;
+      void syncConnectedFolderChanges(true);
+    }, 2500);
+
+    let observer: { disconnect: () => void } | null = null;
+    let observerDebounce: number | null = null;
+    const rootHandle = FolderSync.getRootHandle();
+    const FsoCtor = (
+      window as unknown as {
+        FileSystemObserver?: new (
+          callback: (records: Array<{ changedHandle?: { name?: string } }>) => void
+        ) => {
+          observe: (handle: FileSystemHandle, options?: { recursive?: boolean }) => Promise<void>;
+          disconnect: () => void;
+        };
+      }
+    ).FileSystemObserver;
+
+    if (rootHandle && typeof FsoCtor === 'function') {
+      try {
+        const fso = new FsoCtor((records) => {
+          const onlyMeta = records.every((r) => {
+            const name = r.changedHandle?.name?.toLowerCase() || '';
+            return name === 'books.json' || name.endsWith('_cover.png') || name.endsWith('_cover.jpg');
+          });
+          if (onlyMeta) return;
+          if (observerDebounce) window.clearTimeout(observerDebounce);
+          observerDebounce = window.setTimeout(() => {
+            void syncConnectedFolderChanges(true);
+          }, 350);
+        });
+        fso.observe(rootHandle, { recursive: true }).catch(() => {});
+        observer = fso;
+      } catch {
+        observer = null;
+      }
+    }
+
     return () => {
       window.removeEventListener('focus', maybeScan);
       document.removeEventListener('visibilitychange', maybeScan);
+      window.clearInterval(intervalId);
+      if (observerDebounce) window.clearTimeout(observerDebounce);
+      observer?.disconnect();
     };
-  }, [scanConnectedFolderForNewBooks]);
+  }, [folderState.status, syncConnectedFolderChanges]);
 
   const handleBindOrReconnectFolder = async () => {
     if (FolderSync.hasSavedHandle() && !FolderSync.isConnected()) {
@@ -563,6 +770,12 @@ export default function App() {
     if (FolderSync.isConnected()) {
       await FolderSync.writeFileToSubDir('bookfile', filePath, bookFile);
       await FolderSync.writeFileToSubDir('cover', coverPath, resolvedCoverBlob);
+      const folderName = FolderSync.getState().folderName;
+      if (folderName) {
+        const tracked = loadTrackedFolderBookIds(folderName);
+        tracked.add(id);
+        saveTrackedFolderBookIds(folderName, tracked);
+      }
     }
     if (webdavConfigRef.current.enabled && webdavConfigRef.current.url) {
       try {
@@ -672,6 +885,13 @@ export default function App() {
         if (FolderSync.isConnected()) {
           await FolderSync.deleteFileFromSubDir('cover', book.coverPath);
           await FolderSync.deleteFileFromSubDir('bookfile', book.filePath);
+          const folderName = FolderSync.getState().folderName;
+          if (folderName) {
+            const tracked = loadTrackedFolderBookIds(folderName);
+            if (tracked.delete(book.id)) {
+              saveTrackedFolderBookIds(folderName, tracked);
+            }
+          }
         }
         if (webdavConfigRef.current.enabled && webdavConfigRef.current.url) {
           await deleteWebDavFile(webdavConfigRef.current, book.coverPath);
@@ -1003,12 +1223,12 @@ export default function App() {
                   <button
                     type="button"
                     disabled={folderScanning}
-                    onClick={() => scanConnectedFolderForNewBooks(false)}
-                    title="扫描绑定文件夹内新放入的电子书"
+                    onClick={() => syncConnectedFolderChanges(false)}
+                    title="立即扫描绑定文件夹内的新增与删除（平时也会自动监听变化）"
                     className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[#c4d6c8] bg-white hover:bg-[#e6efe8] disabled:opacity-60 text-[12.5px] font-medium text-[#3a5742] transition-colors cursor-pointer whitespace-nowrap shrink-0"
                   >
                     <FolderSearch className={`w-3.5 h-3.5 ${folderScanning ? 'animate-pulse' : ''}`} />
-                    {folderScanning ? '扫描中...' : '扫描新书'}
+                    {folderScanning ? '同步中...' : '同步目录'}
                   </button>
                 )}
 

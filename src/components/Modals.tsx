@@ -487,8 +487,8 @@ export const FolderGuideModal: React.FC<FolderGuideModalProps> = ({
 
           <div className="space-y-2 text-[12.5px] text-[#6b655b]">
             <p>
-              <strong className="text-[#26231f]">1. 电脑硬盘直写与自动上架（Windows / macOS / Linux Chrome &amp; Edge）：</strong>
-              点击「绑定本地文件夹」授权任意文件夹后，直接把电子书放进该文件夹（根目录或 <code className="text-[#26231f]">bookfile/</code>）切回页面或点击「扫描新书」，书架即会自动识别封面并上架，无需逐本上传。
+              <strong className="text-[#26231f]">1. 电脑硬盘直写与自动双向同步（Windows / macOS / Linux Chrome &amp; Edge）：</strong>
+              点击「绑定本地文件夹」授权任意文件夹后，直接把各格式电子书放进该文件夹（根目录、子目录或 <code className="text-[#26231f]">bookfile/</code>）书架会自动识别封面并上架；在文件夹中删除电子书后，书架也会自动识别并同步删除。
             </p>
             <p>
               <strong className="text-[#26231f]">2. 跨平台 ZIP 备份与迁移（iPad / 手机 / Safari / Firefox 通用）：</strong>
