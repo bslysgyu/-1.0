@@ -116,14 +116,21 @@ export const BookReader: React.FC<BookReaderProps> = ({
     }
     let cancelled = false;
     setPdfLoading(true);
-    ensurePdfWorker();
-    const task = pdfjsLib.getDocument({
-      data: new Uint8Array(parsedBook.pdfBytes.slice(0)),
-    });
-    task.promise
+    let activeTask: pdfjsLib.PDFDocumentLoadingTask | null = null;
+
+    ensurePdfWorker()
+      .then(() => {
+        if (cancelled) return;
+        const task = pdfjsLib.getDocument({
+          data: new Uint8Array(parsedBook.pdfBytes!.slice(0)),
+        });
+        activeTask = task;
+        return task.promise;
+      })
       .then((doc) => {
+        if (!doc) return;
         if (cancelled) {
-          task.destroy();
+          activeTask?.destroy();
           return;
         }
         setPdfDoc(doc);
@@ -135,7 +142,7 @@ export const BookReader: React.FC<BookReaderProps> = ({
 
     return () => {
       cancelled = true;
-      task.destroy();
+      activeTask?.destroy();
     };
   }, [parsedBook]);
 
