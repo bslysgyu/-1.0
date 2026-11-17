@@ -1,26 +1,16 @@
-import * as pdfjsLib from 'pdfjs-dist';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+// @ts-expect-error pdfjs-dist worker entry has no separate .d.ts file
+import * as pdfjsWorker from 'pdfjs-dist/legacy/build/pdf.worker.mjs';
 import type { ParsedBook, ReaderPage, TocItem } from '../types/bookshelf';
 
-let workerInitPromise: Promise<void> | null = null;
-
 export async function ensurePdfWorker(): Promise<void> {
-  if (pdfjsLib.GlobalWorkerOptions.workerSrc) return;
-  if (!workerInitPromise) {
-    workerInitPromise = (async () => {
-      const { default: workerCode } = await import(
-        'pdfjs-dist/build/pdf.worker.min.mjs?raw'
-      );
-      const blob = new Blob([workerCode], { type: 'text/javascript' });
-      pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(blob);
-    })();
-  }
-  try {
-    await workerInitPromise;
-  } catch (err) {
-    workerInitPromise = null;
-    throw err;
+  const g = globalThis as Record<string, unknown>;
+  if (!g.pdfjsWorker) {
+    g.pdfjsWorker = pdfjsWorker;
   }
 }
+
+void ensurePdfWorker();
 
 export async function parsePdfMetadata(
   arrayBuffer: ArrayBuffer,
